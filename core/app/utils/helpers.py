@@ -1,6 +1,5 @@
 from xml.etree.ElementTree import fromstring
 
-
 class Utils:
 
     @staticmethod

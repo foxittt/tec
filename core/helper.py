@@ -3,7 +3,6 @@ import logging
 import math
 import os
 import re
-import sys
 
 from datetime import timedelta
 
@@ -22,7 +21,6 @@ class Utils:
     """
     Python utils, converting and dealing with variable types
     """
-
     @staticmethod
     def array_timestamp_to_datetime(array_timestamp):
         """
@@ -37,6 +35,21 @@ class Utils:
             array.append(dateparser.parse(str(item)))
 
         return array
+
+
+    @staticmethod
+    def restrict_datearray(date_array, initial, final):
+        """
+        Create a new array of dates, based only in the interval initial to final
+
+        :param date_array: Array with string date in timestamp format
+        :param initial: Initial date
+        :param final: Final date
+        :return: A restricted date_array based in the range initial to final
+        """
+        restricted_date_array = [x for x in date_array if initial <= x <= final]
+
+        return restricted_date_array
 
     @staticmethod
     def array_dict_to_array(array_dict, key):
@@ -83,29 +96,30 @@ class Utils:
         orbit_interpolated = {}
         rinex_last_obs_time = Utils.rinex_str_date_to_datetime(hdr['TIME OF LAST OBS'])
 
+        sat_date = orbit['date']
+        date_array_interpolated = np.array([])
+
+        # interpolate times
+        aux_date = sat_date[0]
+        date_array_interpolated = np.append(date_array_interpolated, sat_date[0])
+        while aux_date < rinex_last_obs_time:
+            aux_date += timedelta(seconds=float(hdr['interval']))
+            date_array_interpolated = np.append(date_array_interpolated, aux_date)
+
+        orbit_interpolated['date'] = date_array_interpolated
+
         for prn, data in orbit.items():
-            date_array_in_orbit = np.array([])
-            date_array_interpolated = np.array([])
+            if prn is 'date' or prn is 'path':
+                continue
+
             x_aux = np.array([])
             y_aux = np.array([])
             z_aux = np.array([])
 
             for item in data:
-                if item['date'] > rinex_last_obs_time:
-                    continue
-
-                date_array_in_orbit = np.append(date_array_in_orbit, item['date'])
                 x_aux = np.append(x_aux, item['x'])
                 y_aux = np.append(y_aux, item['y'])
                 z_aux = np.append(z_aux, item['z'])
-
-            date_array_in_orbit = np.append(date_array_in_orbit, rinex_last_obs_time)
-
-            aux_date = date_array_in_orbit[0]
-            date_array_interpolated = np.append(date_array_interpolated, aux_date)
-            while date_array_in_orbit[-1] != aux_date:
-                aux_date += timedelta(seconds=float(hdr['interval']))
-                date_array_interpolated = np.append(date_array_interpolated, aux_date)
 
             x_interp = interp.CubicSpline(np.arange(x_aux.size), x_aux)
             x_interp = x_interp(np.linspace(0, x_aux.size - 1, date_array_interpolated.size))
@@ -116,10 +130,11 @@ class Utils:
             z_interp = interp.CubicSpline(np.arange(z_aux.size), z_aux)
             z_interp = z_interp(np.linspace(0, z_aux.size - 1, date_array_interpolated.size))
 
-            orbit_interpolated[prn] = []
+            pos_aux = []
             for i in range(len(date_array_interpolated)):
-                orbit_interpolated[prn].append({'date': date_array_interpolated[i], 'x': x_interp[i],
-                                                'y': y_interp[i], 'z': z_interp[i]})
+                pos_aux.append({'x': x_interp[i], 'y': y_interp[i], 'z': z_interp[i]})
+
+            orbit_interpolated[prn] = pos_aux
 
         return orbit_interpolated
 
@@ -139,6 +154,9 @@ class Utils:
             return
 
         for key, dcb_type in dcb.items():
+            if key is 'path':
+                continue
+
             dcb_ns[key] = {}
             dcb_aux = {}
             for prn, value in dcb_type.items():
@@ -161,34 +179,26 @@ class Utils:
         :return: The updated DCB parsed file, with the values of bias updated to TEC Unit
         """
         dcb_tecu = {}
+        input = InputFiles()
 
         for key, dcb_type in dcb.items():
+            if key is 'path':
+                continue
+
             dcb_tecu[key] = {}
             dcb_aux = {}
             for prn, value in dcb_type.items():
-                const_str = prn[0:1]
-                prn_str = prn[1:]
-
                 ns_to_meter = settings.C * pow(10, -9)
-
-                if const_str == 'G':
-                    # TODO: conferir com Haroldo/Cosme sobre o uso do factor para converter em TECU
-                    # factor_gps = (f1 - f2) / (f1 + f2) / settings.C
-                    f1 = settings.FREQUENCIES['G']['1']
-                    f2 = settings.FREQUENCIES['G']['2']
-                    factor_gps = pow(f1 * f2, 2) / (f1 + f2) / (f1 - f2) / settings.A / settings.TECU
-                    new_value = [(x * ns_to_meter * factor_gps) for x in value]
-                    dcb_aux[prn] = [new_value[0], value[1]]
-                elif const_str == 'R' and prn_str in factor_glonass:
-                    new_value = [(x * ns_to_meter * factor_glonass[prn_str][2]) for x in value]
-                    dcb_aux[prn] = [new_value[0], value[1]]
+                f1, f2, f3, factor_1, factor_2, factor_3 = input.frequency_by_constellation(prn, factor_glonass)
+                new_value = [(x * ns_to_meter * factor_3) for x in value]
+                dcb_aux[prn] = [new_value[0], value[1]]
 
             dcb_tecu[key].update(dcb_aux)
 
         return dcb_tecu
 
     @staticmethod
-    def check_availability(factor_glonass, dcb, constellation, prn):
+    def check_availability(factor_glonass, dcb, prn):
         """
         Sometimes, the GLONASS factor or DCB array values, might not be available for some specific PRN. Thus, this
         method apply default values for both variables for such cases
@@ -201,35 +211,25 @@ class Utils:
         indicates it has no compensation under a respective equation
         """
         dcb_compensate = 0
-        f1 = settings.FREQUENCIES[constellation]['1']
-        f2 = settings.FREQUENCIES[constellation]['2']
+        input = InputFiles()
 
-        if constellation == 'G':
-            factor = pow(f1 * f2, 2) / (f1 + f2) / (f1 - f2) / settings.A / settings.TECU
-        elif constellation == 'R':
-            if prn not in factor_glonass:
-                logging.info(">>>>>> Relative TEC for {} constellation, was not compensate due to "
-                             "the lack of factor GLONASS for PRN {}".format(constellation, prn))
-            else:
-                factor = factor_glonass[prn][2]
+        f1, f2, f3, factor_1, factor_2, factor_3 = input.frequency_by_constellation(prn, factor_glonass)
 
-        key_in_dcb = constellation + prn
-
-        if key_in_dcb not in dcb['P1-P2']:
+        if prn not in dcb['P1-P2'] or prn[1:] not in factor_glonass:
             logging.info(">>>>>> Relative TEC for {} constellation, was not compensate due to "
-                         "the lack of DCB for PRN {}".format(constellation, prn))
+                         "the lack of DCB/factor GLONASS for PRN {}".format(prn[0:1], prn))
         else:
-            dcb_compensate = dcb['P1-P2'][key_in_dcb][0]
+            dcb_compensate = dcb['P1-P2'][prn][0]
 
-        return factor, dcb_compensate
+        return factor_3, dcb_compensate
 
 
 class InputFiles:
     """
     Complementary methods to download all the input files needed for TEC and Bias estimation procedures
     """
-
-    def _setup_rinex_name(self, rinex_folder, rinex_name):
+    @staticmethod
+    def setup_rinex_name(rinex_folder, rinex_name):
         """
         Test if rinex name is in the old fashion way or in another formats. In case the format is newer or older, the
         method will always return the values needed
@@ -250,21 +250,21 @@ class InputFiles:
             year_i, year_f, year_type = -3, -1, "%y"
             extens = "[\\d]{2}[oO]$"
         else:
-            logging.error(">>>> Error during rinex file reading. Check it and try again!")
-            sys.exit()
+            logging.error(">>>> Error during rinex file reading. Check it and try again!\n")
+            raise Exception(">>>> Error during rinex file reading. Check it and try again!\n")
 
         if len(rinex_name) == 0:
-            logging.error('>> Something wrong with parameter \'rinex_name\'!. Empty name!')
-            sys.exit()
+            logging.error('>> Something wrong with parameter \'rinex_name\'!. Empty name!\n')
+            raise Exception('>> Something wrong with parameter \'rinex_name\'!. Empty name!\n')
         elif not rinex_name[0:4].isalpha():
-            logging.error('>> Something wrong with parameter \'rinex_name\'!. IAGA code not well format!')
-            sys.exit()
+            logging.error('>> Something wrong with parameter \'rinex_name\'!. IAGA code not well format!\n')
+            raise Exception('>> Something wrong with parameter \'rinex_name\'!. IAGA code not well format!\n')
         elif not rinex_name[day_i:day_f].isdigit() or int(rinex_name[day_i:day_f]) > 366:
-            logging.error('>> Something wrong with parameter \'rinex_name\'!. Invalid day of the year!')
-            sys.exit()
+            logging.error('>> Something wrong with parameter \'rinex_name\'!. Invalid day of the year!\n')
+            raise Exception('>> Something wrong with parameter \'rinex_name\'!. Invalid day of the year!\n')
         elif not bool(re.match(extens, rinex_name[-3:])):
-            logging.error('>> Something wrong with parameter \'rinex_name\'!. Wrong extension or not well format!')
-            sys.exit()
+            logging.error('>> Something wrong with parameter \'rinex_name\'!. Wrong extension or not well format!\n')
+            raise Exception('>> Something wrong with parameter \'rinex_name\'!. Wrong extension or not well format!\n')
 
         path = os.path.join(rinex_folder, rinex_name)
         doy = rinex_name[day_i:day_f]
@@ -273,7 +273,8 @@ class InputFiles:
 
         return path, year, month, doy
 
-    def _setup_file_and_download(self, **kwargs):
+    @staticmethod
+    def setup_file_and_download(hdr, **kwargs):
         """
         Prepare the inputs, such as the correct name and paths before actually download it. The files, in this case,
         can only be DCB or Orbit
@@ -293,8 +294,7 @@ class InputFiles:
         rinex_hdr = kwargs.get('rinex_hdr')
         file_type = kwargs.get('file_type')
 
-        requiried_version = str(settings.REQUIRED_VERSION)
-        col_var = settings.COLUMNS_IN_RINEX[requiried_version]
+        col_var = settings.COLUMNS_IN_RINEX[str(hdr['version'])]
 
         if file_type == "DCB":
             l1p_present = True
@@ -332,7 +332,8 @@ class InputFiles:
 
         return obj
 
-    def _updating_c1_to_p1(self, hdr, obs, dcb_m):
+    @staticmethod
+    def compensating_c1_c2(hdr, obs, dcb_m, columns, constellations):
         """
         Update the rinex C1 measures, converting it to P1 values, corresponding to P1 = C1 + DCB_P1-C1, and DCB in
         meters unit
@@ -343,45 +344,174 @@ class InputFiles:
         :return: The updated current rinex with P1 values calculated through C1 and DCB
         """
         if not dcb_m:
-            logging.info(">>>> DCB is empty. Skipping conversion!")
+            logging.info(">>>> DCB is empty. Skipping compensation!")
             return
 
-        requiried_version = str(settings.REQUIRED_VERSION)
-        cols_var = settings.COLUMNS_IN_RINEX[requiried_version]
+        cols_var = settings.COLUMNS_IN_RINEX[str(hdr['version'])]
 
-        for prn in obs.sv.values:
-            if cols_var[prn[0:1]]['P1'] not in hdr['fields'][prn[0:1]] and \
-                    cols_var[prn[0:1]]['C1'] not in hdr['fields'][prn[0:1]]:
-                logging.error(">>>> Columns {} and {} not in rinex for {}...".format(cols_var[prn[0:1]]['P1'],
-                                                                                     cols_var[prn[0:1]]['C1'],
-                                                                                     prn[0:1]))
-                sys.exit()
+        for const in constellations:
+            if cols_var[const]['P1'] not in columns:
+                logging.info(">>>> Compensating {} for constellation {}...".format(cols_var[const]['C1'], const))
+                for prn in obs.sv.values:
+                    obs[cols_var[const]['C1']].sel(sv=prn).values -= (dcb_m['C1-P1'][prn][0] * -1)
 
-            if cols_var[prn[0:1]]['P1'] not in hdr['fields'][prn[0:1]] and \
-                    cols_var[prn[0:1]]['C1'] in hdr['fields'][prn[0:1]]:
-                obs[cols_var[prn[0:1]]['C1']].sel(sv=prn).values -= dcb_m['C1-P1'][prn][0]
+            if cols_var[const]['P2'] not in columns:
+                logging.info(">>>> Compensating {} for constellation {}...".format(cols_var[const]['C2'], const))
+                for prn in obs.sv.values:
+                    obs[cols_var[const]['C2']].sel(sv=prn).values -= dcb_m['C2-P2'][prn][0]
 
         return obs
 
-    def _which_cols_to_load(self):
+    @staticmethod
+    def validate_version(hdr, file):
+        """
+        Check if the current rinex version obey the required one
+
+        :param hdr:
+        :param file:
+        :return:
+        """
+        if hdr['version'] < settings.MIN_REQUIRED_VERSION:
+            logging.error(">>>>>> Version {} required. Current version {}. "
+                          "Process stopped for rinex {}!".format(settings.REQUIRED_VERSION, hdr['version'], file))
+            raise Exception(">>>>>> Version {} required. Current version {}. "
+                            "Process stopped for rinex {}!".format(settings.REQUIRED_VERSION, hdr['version'], file))
+
+    @staticmethod
+    def frequency_by_constellation(prn, factor_glonass):
+        """
+
+        :param constellation:
+        :param factor_glonass:
+        :return:
+        """
+        f1 = 0
+        f2 = 0
+        f3 = 0
+        factor_1 = 0.0
+        factor_2 = 0.0
+        factor_3 = 0.0
+        if prn[0:1] == 'R':
+            if prn[1:] in factor_glonass:
+                f1 = factor_glonass[prn[1:]][0]
+                f2 = factor_glonass[prn[1:]][1]
+                f3 = factor_glonass[prn[1:]][2]
+                factor_1 = factor_glonass[prn[1:]][3]
+                factor_2 = factor_glonass[prn[1:]][4]
+                factor_3 = factor_glonass[prn[1:]][5]
+        elif prn[0:1] == 'G' or prn[0:1] == 'E' or prn[0:1] == 'C':
+            f1 = settings.FREQUENCIES[prn[0:1]][0]
+            f2 = settings.FREQUENCIES[prn[0:1]][1]
+            f3 = settings.FREQUENCIES[prn[0:1]][2]
+            factor_1 = (f1 - f2) / (f1 + f2) / settings.C
+            factor_2 = (f1 * f2) / (f2 - f1) / settings.C
+            factor_3 = pow(f1 * f2, 2) / (f1 + f2) / (f1 - f2) / settings.A / settings.TECU
+        else:
+            logging.warning('>>>> This constellation ({}), does not have frequencies and '
+                            'factors defined. Default values will be assigned (all zeros)'.format(prn[0:1]))
+
+        return f1, f2, f3, factor_1, factor_2, factor_3
+
+    @staticmethod
+    def which_data_to_load(hdr):
         """
         The rinex file is an extensive file, sometimes, with a lot of measures that are not interesting for this present
-        work. Said that, in this method is selected only the columns used during the EMBRACE TEC and Bias estimation
+        work. Said that, in this method is selected only the columns used during the EMBRACE TEC and Bias estimation,
+        such as L1, L2, P1, P2, C1 and C2. This method validate the availability of each of these columns regarding
+        each desired constellation. If there is any missing columns, that constellation is remove from calculus
 
-        :return: The columns to load in rinex
+        :param hdr: Rinex header
+        :return: The columns and constellations available to load in the rinex
         """
-        columns_to_be_load = []
-        requiried_version = str(settings.REQUIRED_VERSION)
-        dict_list_cols = list(settings.COLUMNS_IN_RINEX[requiried_version].values())
+        aux_columns = []
+        data_to_be_load = {}
 
-        for constellation in dict_list_cols:
-            for item in constellation.values():
-                if item not in columns_to_be_load:
-                    columns_to_be_load.append(item)
+        cols_desired_in_rinex = settings.COLUMNS_IN_RINEX[str(hdr['version'])]
+        cols_available_in_rinex = hdr['fields']
 
-        return columns_to_be_load
+        for const in cols_desired_in_rinex:
+            if const in settings.CONSTELATIONS:
+                for col in cols_desired_in_rinex[const]:
+                    if const not in cols_available_in_rinex:
+                        continue
 
-    def _prepare_rinex(self, complete_path, **kwargs):
+                    if cols_desired_in_rinex[const][col] in cols_available_in_rinex[const]:
+                        aux_columns.append(cols_desired_in_rinex[const][col])
+
+                data_to_be_load[const] = aux_columns
+                aux_columns = []
+
+        data_to_be_load_copy = data_to_be_load.copy()
+
+        for const in data_to_be_load_copy:
+            if cols_desired_in_rinex[const]['L1'] not in data_to_be_load[const]:
+                logging.info(">>>>>> Column {} is not available for constellation {}. "
+                             "TEC wont be consider for this constellation!".format(cols_desired_in_rinex[const]['L1'],
+                                                                                   const))
+                del data_to_be_load[const]
+                continue
+
+            if cols_desired_in_rinex[const]['L2'] not in data_to_be_load[const] and \
+                    cols_desired_in_rinex[const]['L3'] not in data_to_be_load[const]:
+                logging.info(">>>>>> Column {} and {} are not available for constellation {}. "
+                             "TEC wont be consider for this constellation!".format(cols_desired_in_rinex[const]['L2'],
+                                                                                   cols_desired_in_rinex[const]['L3'],
+                                                                                   const))
+                del data_to_be_load[const]
+                continue
+
+            if cols_desired_in_rinex[const]['P1'] not in data_to_be_load[const] and \
+                    cols_desired_in_rinex[const]['C1'] not in data_to_be_load[const]:
+                logging.info(">>>>>> Column {} and {} are not available for constellation {}. "
+                             "TEC wont be consider for this constellation!".format(cols_desired_in_rinex[const]['P1'],
+                                                                                   cols_desired_in_rinex[const]['C1'],
+                                                                                   const))
+                del data_to_be_load[const]
+                continue
+
+            if cols_desired_in_rinex[const]['P2'] not in data_to_be_load[const] and \
+                    cols_desired_in_rinex[const]['C2'] not in data_to_be_load[const]:
+                logging.info(">>>>>> Column {} and {} are not available for constellation {}. "
+                             "TEC wont be consider for this constellation!".format(cols_desired_in_rinex[const]['P2'],
+                                                                                   cols_desired_in_rinex[const]['C2'],
+                                                                                   const))
+                del data_to_be_load[const]
+                continue
+
+            if cols_desired_in_rinex[const]['L2'] in data_to_be_load[const] and \
+                    cols_desired_in_rinex[const]['L3'] in data_to_be_load[const]:
+                del data_to_be_load[const]['L3']
+
+        constellations = list(data_to_be_load.keys())
+        flattened_columns = [y for x in list(data_to_be_load.values()) for y in x]
+
+        l2_channel = True
+        l1_col = {}
+        l2_or_l3_col = {}
+        p1_or_c1_col = {}
+        p2_or_c2_col = {}
+        for const in constellations:
+            l1_col[const] = cols_desired_in_rinex[const]['L1']
+
+            if cols_desired_in_rinex[const]['L2'] in flattened_columns:
+                l2_or_l3_col[const] = cols_desired_in_rinex[const]['L2']
+            else:
+                l2_channel = False
+                l2_or_l3_col[const] = cols_desired_in_rinex[const]['L3']
+
+            if cols_desired_in_rinex[const]['P1'] in flattened_columns:
+                p1_or_c1_col[const] = cols_desired_in_rinex[const]['P1']
+            else:
+                p1_or_c1_col[const] = cols_desired_in_rinex[const]['C1']
+
+            if cols_desired_in_rinex[const]['P2'] in flattened_columns:
+                p2_or_c2_col[const] = cols_desired_in_rinex[const]['P2']
+            else:
+                p2_or_c2_col[const] = cols_desired_in_rinex[const]['C2']
+
+        return flattened_columns, constellations, l1_col, l2_or_l3_col, p1_or_c1_col, p2_or_c2_col, l2_channel
+
+    def _prepare_rinex(self, complete_path):
         """
         Prepare the rinexs, such as checking if it is a valid file and if it has all the information need for the
         calculation
@@ -396,31 +526,28 @@ class InputFiles:
         :return: The Python objects after to successful read the prev and rinex, it includes the header
         and measures of both files
         """
-        is_partial = kwargs.get('is_partial')
-
         if not os.path.isfile(complete_path):
-            logging.error(">>>> Rinex " + complete_path + " does not exist. Process stopped!")
-            sys.exit()
+            logging.error(">>>> Rinex {} does not exist. Process stopped!\n".format(complete_path))
+            raise Exception(">>>> Rinex {} does not exist. Process stopped!\n".format(complete_path))
 
-        columns_to_be_load = self._which_cols_to_load()
-
-        logging.info(">> Reading rinex: " + complete_path)
+        logging.info(">> Validating file and measures...")
         hdr = gr.rinexheader(complete_path)
-        if hdr['version'] < settings.REQUIRED_VERSION:
-            logging.error(">>>> Version {} required. Current version {}. "
-                          "Process stopped!".format(settings.REQUIRED_VERSION, hdr['version']))
-            sys.exit()
+        logging.info(">>>> Rinex version {}!".format(hdr['version']))
 
-        if not is_partial:
-            obs = gr.load(complete_path, meas=columns_to_be_load, use=settings.CONSTELATIONS)
+        self.validate_version(hdr, complete_path)
+        columns, constellations, l1_col, l2_or_l3_col, p1_or_c1_col, p2_or_c2_col, l2_channel = self.which_data_to_load(hdr)
+
+        if not constellations:
+            logging.info(">>>> This rinex ({}) does not have the measures required for the TEC and bias estimation.\n".
+                         format(complete_path))
+            raise Exception(">>>> This rinex ({}) does not have the measures required for the TEC and "
+                            "bias estimation.\n".format(complete_path))
         else:
-            initial = kwargs.get('initial')
-            final = kwargs.get('final')
-            obs = gr.load(complete_path, meas=columns_to_be_load, use=settings.CONSTELATIONS, tlim=[initial, final])
+            logging.info(">> Reading rinex measures...")
+            obs = gr.load(complete_path, meas=columns, use=constellations)
+            logging.info("Only constellation(s) {} will be considered!".format(constellations))
 
-        logging.info(">>>> Rinex version {}. Constellations: {}".format(hdr['version'], settings.CONSTELATIONS))
-
-        return hdr, obs
+        return hdr, obs, columns, constellations, l1_col, l2_or_l3_col, p1_or_c1_col, p2_or_c2_col, l2_channel
 
     def _prepare_factor(self, hdr, year, day, month):
         """
@@ -479,14 +606,13 @@ class InputFiles:
                     }
         """
         logging.info(">> Downloading Orbit files...")
-        orbit = self._setup_file_and_download(year=year, month=month, day=day, rinex_hdr=hdr, file_type='Orbit')
+        orbit = self.setup_file_and_download(hdr, year=year, month=month, day=day, rinex_hdr=hdr, file_type='Orbit')
 
         logging.info(">> Checking precision in time of both files, rinex and orbit...")
         if not math.isnan(hdr['interval']):
             rinex_interval = float(hdr['interval'])
 
-        orbit_prn = list(orbit.keys())
-        orbit_diff = orbit[orbit_prn[0]][1]['date'] - orbit[orbit_prn[0]][0]['date']
+        orbit_diff = orbit['date'][1] - orbit['date'][0]
         orbit_interval = orbit_diff.total_seconds()
 
         if rinex_interval < orbit_interval:
@@ -537,27 +663,9 @@ class InputFiles:
                     }
         """
         logging.info(">> Downloading DCB files...")
-        dcb = self._setup_file_and_download(year=year, month=month, day=day, rinex_hdr=hdr, file_type='DCB')
+        dcb = self.setup_file_and_download(hdr, year=year, month=month, day=day, rinex_hdr=hdr, file_type='DCB')
 
         return dcb
-
-    def prepare_rinex_partial(self, folder, file):
-        """
-
-        :param folder:
-        :param file:
-        :return:
-        """
-        path, year, month, doy = self._setup_rinex_name(folder, file)
-
-        initial_date = datetime.datetime(int(year), 1, 1, settings.INITIAL_HOUR_RECALC_BIAS, 0) + \
-                       datetime.timedelta(int(doy) - 1)
-        final_date = datetime.datetime(int(year), 1, 1, settings.FINAL_HOUR_RECALC_BIAS, 0) + \
-                     datetime.timedelta(int(doy) - 1)
-
-        hdr, obs = self._prepare_rinex(path, is_partial=True, initial=initial_date, final=final_date)
-
-        return hdr, obs
 
     def prepare_inputs(self, folder, file):
         """
@@ -569,9 +677,9 @@ class InputFiles:
         :param file: Name of the file in order to extract the corresponding year and month values: ssssdddd.yyo
         :return: The rinex header and measures objects, orbit object, dcb object, and factor_glonass object
         """
-        path, year, month, doy = self._setup_rinex_name(folder, file)
+        path, year, month, doy = self.setup_rinex_name(folder, file)
 
-        hdr, obs = self._prepare_rinex(path, is_partial=False)
+        hdr, obs, columns, constellations, l1_col, l2_or_l3_col, p1_or_c1_col, p2_or_c2_col, l2_channel = self._prepare_rinex(path)
         factor_glonass = self._prepare_factor(hdr, year, month, doy)
         orbit = self._prepare_orbit(hdr, year, month, doy)
         dcb = self._prepare_dcb(hdr, year, month, doy)
@@ -579,10 +687,11 @@ class InputFiles:
         logging.info(">> Converting DCB nanoseconds in meter unit...")
         dcb_m = Utils.convert_dcb_ns_to_meter(dcb)
 
-        logging.info(">> Converting C1 values to correspond P1 in rinex (P1 = C1 + DCB_P1-C1[meters])...")
-        obs = self._updating_c1_to_p1(hdr, obs, dcb_m)
+        logging.info(">> Checking the availability of P1 and P2...")
+        obs = self.compensating_c1_c2(hdr, obs, dcb_m, columns, constellations)
 
-        return hdr, obs, orbit, dcb, factor_glonass
+        return hdr, obs, orbit, dcb, factor_glonass, l1_col, l2_or_l3_col, p1_or_c1_col, \
+               p2_or_c2_col, l2_channel, constellations
 
 
 class Geodesy:
@@ -603,32 +712,33 @@ class Geodesy:
         :param z_rec: Z axis receiver position value
         :return: Sub-ionospheric position array, corresponding to Lat, Long and Altitude, respectively
         """
-        sub_ion_x = []
-        sub_ion_y = []
-        sub_ion_z = []
+        x_sat = np.array(x_sat)
+        y_sat = np.array(y_sat)
+        z_sat = np.array(z_sat)
+        diff_x = np.array([item - x_rec for item in x_sat])
+        diff_y = np.array([item - y_rec for item in y_sat])
+        diff_z = np.array([item - z_rec for item in z_sat])
 
-        for i, item in enumerate(x_sat):
-            diff_x = x_sat[i] - x_rec
-            diff_y = y_sat[i] - y_rec
-            diff_z = z_sat[i] - z_rec
+        phi = (x_sat * y_rec) - (y_sat * x_rec)
+        theta = (x_sat * z_rec) - (z_sat * x_rec)
 
-            phi = (x_sat[i]) * y_rec - (y_sat[i] * x_rec)
-            theta = (x_sat[i] * z_rec) - (z_sat[i] * x_rec)
+        sqr_sum_1 = np.power(diff_y, 2) + np.power(diff_z, 2) + np.power(diff_x, 2)
+        sqr_sum_2 = np.power(phi, 2) + np.power(theta, 2) - np.power(diff_x, 2) * np.power(altitude, 2)
+        factor = np.power(diff_y * phi + diff_z * theta, 2) - sqr_sum_1 * sqr_sum_2
 
-            sqr_sum = math.pow(diff_y, 2) + math.pow(diff_z, 2) + math.pow(diff_x, 2)
-            factor = math.pow(diff_y * phi + diff_z * theta, 2) - sqr_sum * (math.pow(phi, 2) + math.pow(theta, 2) -
-                                                                             math.pow(diff_x, 2) * math.pow(altitude,
-                                                                                                            2))
-            factor = math.sqrt(factor)
+        factor = np.sqrt(factor)
+        factor = np.nan_to_num(factor)
 
-            dum = (-1 * (diff_y * phi + diff_z * theta) - factor) / sqr_sum
+        dum = (-1 * (diff_y * phi + diff_z * theta) - factor) / sqr_sum_1
 
-            if ((x_sat[i] - dum) * (x_rec - dum)) > 0:
-                dum = (-1 * (diff_y * phi + diff_z * theta) + factor) / sqr_sum
+        term0 = (x_sat - dum) * (x_rec - dum)
+        for i, item in enumerate(term0):
+            if item > 0:
+                dum[i] = (-1 * (diff_y[i] * phi[i] + diff_z[i] * theta[i]) + factor[i]) / sqr_sum_1[i]
 
-            sub_ion_x.append(dum)
-            sub_ion_y.append((diff_y * dum + phi) / diff_x)
-            sub_ion_z.append((diff_z * dum + theta) / diff_x)
+        sub_ion_x = dum
+        sub_ion_y = (diff_y * dum + phi) / diff_x
+        sub_ion_z = (diff_z * dum + theta) / diff_x
 
         return sub_ion_x, sub_ion_y, sub_ion_z
 
@@ -669,56 +779,45 @@ class Geodesy:
         :param array_z: Subionospheric coordinate in z
         :return: The converted triplice coordination array
         """
-        array_x_pol = []
-        array_y_pol = []
-        array_z_pol = []
+        array_x_pol = [0.0] * len(array_x)
+        array_y_pol = [0.0] * len(array_y)
+        array_z_pol = [0.0] * len(array_z)
 
-        for i in range(len(array_x)):
-            x = array_x[i]
-            y = array_y[i]
-            z = array_z[i]
+        euclidian_distance = np.sqrt(np.power(array_x, 2) + np.power(array_y, 2))
+        e = (2 - (1 / settings.ELLIPTICITY)) / settings.ELLIPTICITY
 
-            euclidian_distance = math.sqrt(math.pow(x, 2) + math.pow(y, 2))
-            e = (2 - (1 / settings.ELLIPTICITY)) / settings.ELLIPTICITY
-            x_pol = 0.0
-            y_pol = 0.0
-            z_pol = 0.0
+        for k, item in enumerate(euclidian_distance):
+            if item != 0:
+                array_x_pol[k] = np.arctan(array_z[k] / item)
 
-            if euclidian_distance != 0:
-                x_pol = math.atan(z / euclidian_distance)
+                n = settings.RADIUS_EQUATOR / np.sqrt(1 - e * np.power(np.sin(array_x_pol[k]), 2))
+                array_x_pol[k] = np.arctan(array_z[k] / (item - (e * n * np.cos(array_x_pol[k]))))
 
-                for i in range(7):
-                    n = settings.RADIUS_EQUATOR / math.sqrt(1 - e * math.pow(math.sin(z_pol), 2))
-                    x_pol = math.atan(z / (euclidian_distance - (e * n * math.cos(x_pol))))
-
-                if x != 0:
-                    y_pol = math.atan(y / x)
-                    if x < 0:
-                        y_pol = y_pol + math.pi
+                if array_x[k] != 0:
+                    array_y_pol[k] = np.arctan(array_y[k] / array_x[k])
+                    if array_x[k] < 0:
+                        array_y_pol[k] += math.pi
                 else:
-                    y_pol = y / abs(y) * (math.pi / 2)
+                    array_y_pol[k] = array_y[k] / abs(array_y[k]) * (math.pi / 2)
 
-                z_pol = euclidian_distance / math.cos(x_pol) - n
+                array_z_pol[k] = item / np.cos(array_x_pol[k]) - n
 
             else:
                 logging.info(">>>>>> Square root equal zero!")
 
-            x_pol = x_pol * 180 / math.pi
-            y_pol = y_pol * 180 / math.pi
+        array_x_pol = [(180 / math.pi) * x for x in array_x_pol]
+        array_y_pol = [(180 / math.pi) * y for y in array_y_pol]
 
-            aux = y_pol
-            if y_pol > 180.0:
-                aux = y_pol - 180
+        for k, item in enumerate(array_y_pol):
+            if item > 180.0:
+                aux = item - 180
                 aux = -1 * (180 - aux)
-            elif y_pol < -180.0:
-                aux = y_pol + 180
+            elif item < -180.0:
+                aux = item + 180
                 aux = 180 + aux
+            else:
+                aux = item
 
-            y_pol = aux
-
-            array_x_pol.append(x_pol)
-            array_y_pol.append(y_pol)
-            array_z_pol.append(z_pol)
+            array_y_pol[k] = aux
 
         return array_x_pol, array_y_pol, array_z_pol
-

@@ -161,7 +161,6 @@ class DownloadOrbit(DownloadGeneric):
     """
     Download Orbit files
     """
-    # TODO: Verificar existência de Orbits MGEX nos dois formatos de arquivos COD0MGXFIN... e comwwwwd.SP3
     _api = settings.URL_ORBIT_MGEX
     _file = "COD0MGXFIN_{0}{1}0000_01D_05M_ORB.SP3.gz"
     _file2 = "com{0}.sp3.Z"

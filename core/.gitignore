@@ -1,0 +1,3 @@
+*.pyc
+tec-data/
+.venv/

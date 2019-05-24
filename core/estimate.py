@@ -1,11 +1,11 @@
 import logging
-import sys
 import numpy as np
 import math
-import datetime
-import bisect
+import pyproj
 import warnings
-import itertools
+import datetime
+
+from scipy.signal import savgol_filter
 
 import settings as settings
 import helper as helper
@@ -17,7 +17,7 @@ class TECEstimation:
     and vertical estimation, besides the slant factor, which gives the ionopheric point where the TEC has been estimated
     """
 
-    def relative(self, hdr, obs, factor_glonass, dcb):
+    def relative(self, obs, factor_glonass, dcb, p1_or_c1_col, p2_or_c2_col):
         """
         Calculate the pseudo-range or pseudo-distance, which is the first TEC calculation, called relative TEC or simply
         R TEC. The R TEC includes, then, not only the TEC, but also all the extra influences, such as atmosphere
@@ -32,25 +32,15 @@ class TECEstimation:
         """
         tec_r = {}
         utils = helper.Utils()
-        requiried_version = str(settings.REQUIRED_VERSION)
-        col_var = settings.COLUMNS_IN_RINEX[requiried_version]
 
         logging.info(">>>> Converting DCB nanoseconds in TEC unit...")
         dcb_tecu = helper.Utils.convert_dcb_ns_to_tecu(dcb, factor_glonass)
 
+        logging.info(">>>> Calculating relative TEC and removing satellite DCB...")
         for prn in obs.sv.values:
-            constellation_str = prn[0:1]
-            prn_str = prn[1:]
-
-            if col_var[constellation_str]['P1'] in hdr['fields'][constellation_str]:
-                a1 = obs[col_var[constellation_str]['P1']].sel(sv=prn).values - \
-                     obs[col_var[constellation_str]['P2']].sel(sv=prn).values
-            else:
-                a1 = obs[col_var[constellation_str]['C1']].sel(sv=prn).values - \
-                     obs[col_var[constellation_str]['P2']].sel(sv=prn).values
-
-            factor, dcb_compensate = utils.check_availability(factor_glonass, dcb_tecu, constellation_str, prn_str)
-            tec_r[prn] = factor * (a1 - dcb_compensate)
+            a = obs[p1_or_c1_col[prn[0:1]]].sel(sv=prn).values - obs[p2_or_c2_col[prn[0:1]]].sel(sv=prn).values
+            factor, dcb_compensate = utils.check_availability(factor_glonass, dcb_tecu, prn)
+            tec_r[prn] = ((factor * a) - dcb_compensate).tolist()
 
         return tec_r
 
@@ -79,95 +69,162 @@ class TECEstimation:
         utils = helper.Utils()
         geodesy = helper.Geodesy()
 
-        rec_x = hdr['position'][0] / 1000
-        rec_y = hdr['position'][1] / 1000
-        rec_z = hdr['position'][2] / 1000
+        rec_x = hdr['position'][0]
+        rec_y = hdr['position'][1]
+        rec_z = hdr['position'][2]
+
+        ecef = pyproj.Proj(proj='geocent', ellps='WGS84', datum='WGS84')
+        lla = pyproj.Proj(proj='latlong', ellps='WGS84', datum='WGS84')
+        lon, lat, alt = pyproj.transform(ecef, lla, rec_x, rec_y, rec_z, radians=False)
 
         degrad = float(math.pi / 180.0)
         dpi = float('{:.16f}'.format(math.pi))
+
+        lon = (lon + 360) * degrad
+        lat *= degrad
+
+        sin_rec_x = math.sin(lon)
+        sin_rec_y = math.sin(lat)
+        cos_rec_x = math.cos(lon)
+        cos_rec_y = math.cos(lat)
 
         for prn in obs.sv.values:
             if prn not in orbit.keys():
                 continue
 
-            sat_date = utils.array_dict_to_array(orbit[prn], 'date')
             sat_x = utils.array_dict_to_array(orbit[prn], 'x')
+            sat_x = [x * 1000 for x in sat_x]
+
             sat_y = utils.array_dict_to_array(orbit[prn], 'y')
+            sat_y = [y * 1000 for y in sat_y]
+
             sat_z = utils.array_dict_to_array(orbit[prn], 'z')
+            sat_z = [z * 1000 for z in sat_z]
 
             diff_x = np.array([item - rec_x for item in sat_x])
             diff_y = np.array([item - rec_y for item in sat_y])
             diff_z = np.array([item - rec_z for item in sat_z])
 
-            sin_rec_x = math.sin(rec_x)
-            sin_rec_y = math.sin(rec_y)
-            cos_rec_x = math.cos(rec_x)
-            cos_rec_y = math.cos(rec_y)
+            term1 = -cos_rec_x * sin_rec_y * diff_x
+            term2 = sin_rec_x * sin_rec_y * diff_y
+            term3 = cos_rec_y * diff_z
+            term4 = -sin_rec_x * diff_x
+            term5 = cos_rec_x * diff_y
+            term6 = cos_rec_x * cos_rec_y * diff_x
+            term7 = sin_rec_x * cos_rec_y * diff_y
+            term8 = sin_rec_y * diff_z
 
-            north = (-cos_rec_y * sin_rec_x * diff_x) - (sin_rec_y * sin_rec_x * diff_y) + (cos_rec_x * diff_z)
-            east = (-sin_rec_y * diff_x) + (cos_rec_y * diff_y)
-            vertical = (cos_rec_y * cos_rec_x * diff_x) + (sin_rec_y * cos_rec_x * diff_y) + sin_rec_x * diff_z
-            vertical_norm = np.sqrt(np.power(cos_rec_y * cos_rec_x, 2) + np.power(sin_rec_y * cos_rec_x, 2) +
-                                    np.power(sin_rec_x, 2))
+            north = term1 - term2 + term3
+            east = term4 + term5
+            vertical = term6 + term7 + term8
+            vertical_norm = np.sqrt(np.power(cos_rec_x * cos_rec_y, 2) +
+                                    np.power(sin_rec_x * cos_rec_y, 2) +
+                                    np.power(sin_rec_y, 2))
+
             r = np.sqrt(np.power(diff_x, 2) + np.power(diff_y, 2) + np.power(diff_z, 2))
 
+            ion_x, ion_y, ion_z = geodesy.sub_ion_point(settings.ALT_IONO, sat_x, sat_y, sat_z, rec_x, rec_y, rec_z)
             top_ion_x, top_ion_y, top_ion_z = geodesy.sub_ion_point(settings.ALT_IONO_TOP, sat_x, sat_y, sat_z,
                                                                     rec_x, rec_y, rec_z)
             bot_ion_x, bot_ion_y, bot_ion_z = geodesy.sub_ion_point(settings.ALT_IONO_BOTTOM, sat_x, sat_y, sat_z,
                                                                     rec_x, rec_y, rec_z)
-            slant_factor = np.power(np.array(top_ion_x) - np.array(bot_ion_x), 2) + \
-                           np.power(np.array(top_ion_y) - np.array(bot_ion_y), 2) + \
-                           np.power(np.array(top_ion_z) - np.array(bot_ion_z), 2)
+            ion_lat, ion_long, ion_alt = geodesy.car_2_pol(ion_x, ion_y, ion_z)
 
             average_height = settings.ALT_IONO_TOP - settings.ALT_IONO_BOTTOM
-            slant_factor = np.sqrt(slant_factor) / average_height
             ang_zenital = np.arccos(vertical / (r * vertical_norm))
             ang_elev = ((dpi / 2) - ang_zenital) / degrad
+            slant_factor = np.arcsin((settings.EARTH_RAY / (settings.EARTH_RAY + average_height)) *
+                                     np.cos(ang_elev * degrad))
 
-            rec_x *= degrad
-            rec_y *= degrad
+            slant_factor_java = pow(np.array(top_ion_x) - np.array(bot_ion_x), 2) + \
+                                pow(np.array(top_ion_y) - np.array(bot_ion_y), 2) + \
+                                pow(np.array(top_ion_z) - np.array(bot_ion_z), 2)
+            slant_factor_java = np.sqrt(slant_factor_java) / average_height
+
+            slant_factor = np.cos(slant_factor)
 
             azimute = np.arctan2(east, north)
             azimute[azimute < 0] += (2 * math.pi)
             azimute = azimute / degrad
 
             var1 = ang_elev * degrad
-            w = (dpi / 2) - var1 - np.arcsin(settings.EARTH_RAY / (settings.EARTH_RAY + average_height)) * np.cos(var1)
+            w = (dpi / 2) - var1 - np.arcsin(settings.EARTH_RAY / (settings.EARTH_RAY + average_height) * np.cos(var1))
 
-            var2 = np.sin(rec_x) * np.cos(w)
-            var3 = np.cos(rec_y) * np.sin(w) * np.cos(azimute * degrad)
-            lat_pp = np.arcsin(var2) + var3
+            var2 = sin_rec_y * np.cos(w)
+            var3 = cos_rec_y * np.sin(w) * np.cos(azimute * degrad)
+            lat_pp = np.arcsin(var2 + var3)
 
             var4 = np.sin(w) * np.sin(azimute * degrad)
-            long_pp = rec_x + np.arcsin(var4 / np.cos(lat_pp))
+            long_pp = lon + np.arcsin(var4 / np.cos(lat_pp))
 
             lat_pp = lat_pp / degrad
             long_pp = long_pp / degrad
 
-            tec_s[prn] = [sat_date, slant_factor, ang_zenital, ang_elev, azimute, lat_pp, long_pp]
+            slant_factor = slant_factor.tolist()
+            ang_elev = ang_elev.tolist()
+            azimute = azimute.tolist()
+            lat_pp = lat_pp.tolist()
+            long_pp = long_pp.tolist()
+
+            tec_s[prn] = [slant_factor, ang_elev, azimute, lat_pp, long_pp]
 
         return tec_s
 
-    def absolute(self, tec, bias):
+    def detrended(self, tec, factor_glonass, l2_channel):
+        """
+        :param tec: Dict with TEC python object
+        :param factor_glonass: The channels values of each GLONASS PRNs to calc the selective factor
+        :param l2_channel:
+        :return: The updated TEC object, now, with detrended TEC calculated
+        """
+        tec_d = {}
+        input = helper.InputFiles()
+
+        for prn in tec['relative-l1-l2']:
+            l1 = np.array(tec['relative-l1-l2'][prn][1])
+            l2_or_l3 = np.array(tec['relative-l1-l2'][prn][2])
+
+            f1, f2, f3, factor_1, factor_2, factor_3 = input.frequency_by_constellation(prn, factor_glonass)
+
+            if l2_channel:
+                term1 = ((l1 / f1) - (l2_or_l3 / f2)) * settings.C
+            else:
+                term1 = ((l1 / f1) - (l2_or_l3 / f3)) * settings.C
+
+            sTEC_diff = factor_3 * term1
+            savgol = savgol_filter(sTEC_diff, 121, 2, mode='nearest')
+
+            tec_d[prn] = (sTEC_diff - savgol).tolist()
+
+        return tec_d
+
+    def absolute(self, tec, constellations):
         """
         The absolute TEC consists in the TEC without the contribution of bias. In this method, the Python TEC object
         is updated with the subtraction of bias.
 
         :param tec: Dict with TEC python object
-        :param bias: Object with the receptor estimate bias
+        :param constellations:
         :return: The updated TEC object, now, with absolute TEC calculated
         """
         tec_a = {}
-        bias_receiver = bias['B'][-1]
+        b = tec['bias']['B']
+        bias_receiver = b[len(b)-len(constellations):len(b)]
 
-        # TODO: Haroldo reportou que o bias do receptor pode já estar em metros. E deve ser multiplicado pelo fator
-        #  daquela constelação antes de ser subtraido do tec relativo
-        for prn, values in tec['relative-p1c1'].items():
-            tec_a[prn] = tec['relative-p1c1'][prn] - bias_receiver
+        if len(bias_receiver) != len(constellations):
+            logging.warning()
+
+        for c, const in enumerate(constellations):
+            for prn, values in tec['relative-p1c1'].items():
+                if prn[0:1] is not const:
+                    continue
+
+                absolute = np.array(tec['relative-p1c1'][prn]) - bias_receiver[c]
+                tec_a[prn] = absolute.tolist()
 
         return tec_a
 
-    def vertical(self, tec):
+    def vertical(self, tec, orbit):
         """
         When calculated, the TEC is function of satellites incident angles, sometimes, in the horizon. The vertical
         TEC is the process to remove this influence, bringing the TEC perpendicular to the receiver, called vertical
@@ -176,45 +233,30 @@ class TECEstimation:
         calculated.
 
         :param tec: Dict with TEC python object
+        :param orbit:
         :return: The updated TEC object, now, with vertical TEC calculated
         """
-        # tec_v = {}
-        #
-        # for prn, values in tec['absolute'].items():
-        #     if prn not in tec['slant'].keys():
-        #         continue
-        #
-        #     absolute_np = np.array(tec['absolute'][prn])
-        #     slant_np = np.array(tec['slant'][prn][4])
-        #     tec_v[prn] = absolute_np / slant_np
+        tec_v = {}
 
-        # tec_s_short = {}
-        #
-        # slant_keys = list(tec['slant'].keys())
-        #
-        # time_in_rinex = tec['time']
-        # time_in_orbit = tec['slant'][slant_keys[0]][0]
-        #
-        # max_date_in_rinex = max(d for d in time_in_rinex if isinstance(d, datetime.date))
-        # min_date_in_rinex = min(d for d in time_in_rinex if isinstance(d, datetime.date))
-        #
-        # lower = bisect.bisect_left(time_in_orbit, min_date_in_rinex)
-        # upper = bisect.bisect_right(time_in_orbit, max_date_in_rinex)
-        #
-        # for prn in tec['slant']:
-        #     tec_s_short[prn] = [time_in_rinex, tec['slant'][prn][1][lower:upper], tec['slant'][prn][2][lower:upper],
-        #                         tec['slant'][prn][3][lower:upper], tec['slant'][prn][4][lower:upper],
-        #                         tec['slant'][prn][5][lower:upper]]
-        #
-        # for prn, values in tec['absolute'].items():
-        #     if prn not in tec['slant'].keys():
-        #         continue
-        #
-        #     absolute_np = np.array(tec['absolute'][prn])
-        #     slant_np = np.array(tec_s_short[prn][1])
-        #     tec_v[prn] = absolute_np / slant_np
+        for prn, values in tec['absolute'].items():
+            if prn not in tec['slant'].keys():
+                continue
 
-        # return tec_v
+            absolute_np = np.array(tec['absolute'][prn])
+            slant_np = np.array(tec['slant'][prn][0])
+
+            if absolute_np.shape[0] != slant_np.shape[0]:
+                slant_np_aux = []
+
+                for i, item in enumerate(orbit['date']):
+                    if item in tec['time']:
+                        slant_np_aux.append(slant_np[i])
+
+                slant_np = np.array(slant_np_aux)
+
+            tec_v[prn] = (absolute_np / slant_np).tolist()
+
+        return tec_v
 
 
 class BiasEstimation:
@@ -253,7 +295,7 @@ class BiasEstimation:
 
         return indexes_fraction
 
-    def _build_coefficients(self, tec):
+    def _build_coefficients(self, tec, constellations):
         """
         Build the coefficients of the equation system. These terms are defined through a Least-Square Fitting method,
         which consist in the minimization of set of unknown variable, dispose in a set of equations, so called,
@@ -264,6 +306,7 @@ class BiasEstimation:
         value of relative / tec slant
 
         :param tec: The TEC object, with relative and slant factor, calculated by PRN
+        :param constellations:
         :return: The group 1 and 2 of coefficients, which is hourly mean of 1 / slant_factor, and
         hourly mean of tec_relative / slant_factor, respectively
             For example:
@@ -289,38 +332,49 @@ class BiasEstimation:
         coefficients = {}
         group_1 = {}
         group_2 = {}
+        res = str(settings.TEC_RESOLUTION_ESTIMATION)
 
         indexes = self._split_datetime_array(tec['time'])
 
         for i, ind in enumerate(indexes):
-            group_1_aux = []
-            group_2_aux = []
+            group_1_aux_dict = {}
+            group_2_aux_dict = {}
 
-            for prn in tec['slant']:
-                elements_slant = np.take(tec['slant'][prn][1], ind)
-                elements_relat = np.take(tec['relative-p1c1'][prn], ind)
-                _1_slant = np.divide(1, elements_slant)
-                _relative_slant = np.divide(elements_relat, elements_slant)
+            for const in constellations:
+                group_1_aux = []
+                group_2_aux = []
 
-                with warnings.catch_warnings():
-                    warnings.filterwarnings('error')
-                    try:
-                        avg_sla = np.nanmean(_1_slant, dtype=np.float32)
-                    except RuntimeWarning:
-                        avg_sla = np.NaN
+                for prn in tec['slant']:
+                    if prn[0:1] is not const:
+                        continue
 
-                with warnings.catch_warnings():
-                    warnings.filterwarnings('error')
-                    try:
-                        avg_rel = np.nanmean(_relative_slant, dtype=np.float32)
-                    except RuntimeWarning:
-                        avg_rel = np.NaN
+                    elements_slant = np.take(tec['slant'][prn][0], ind)
+                    elements_relat = np.take(tec['relative-p1c1'][prn], ind)
+                    _1_slant = np.divide(1, elements_slant)
+                    _relative_slant = np.divide(elements_relat, elements_slant)
 
-                group_1_aux.append(avg_sla)
-                group_2_aux.append(avg_rel)
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('error')
+                        try:
+                            avg_sla = np.nanmean(_1_slant, dtype=np.float32)
+                        except RuntimeWarning:
+                            avg_sla = np.NaN
 
-            group_1["every_" + str(settings.TEC_RESOLUTION_ESTIMATION) + "_frac_" + str(i)] = group_1_aux
-            group_2["every_" + str(settings.TEC_RESOLUTION_ESTIMATION) + "_frac_" + str(i)] = group_2_aux
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('error')
+                        try:
+                            avg_rel = np.nanmean(_relative_slant, dtype=np.float32)
+                        except RuntimeWarning:
+                            avg_rel = np.NaN
+
+                    group_1_aux.append(avg_sla)
+                    group_2_aux.append(avg_rel)
+
+                group_1_aux_dict[const] = group_1_aux
+                group_2_aux_dict[const] = group_2_aux
+
+            group_1["every_" + res + "_frac_" + str(i)] = group_1_aux_dict
+            group_2["every_" + res + "_frac_" + str(i)] = group_2_aux_dict
 
         coefficients['group_1'] = group_1
         coefficients['group_2'] = group_2
@@ -333,18 +387,23 @@ class BiasEstimation:
         coefficients 1/slant_factor
 
         :param group1_coefficients:
-        :return: A numpy matrix F
+        :return: Numpy matrix F
         """
+        keys = list(group1_coefficients.keys())
         intervals_a_day = len(list(group1_coefficients.keys()))
-        n_prns = len(list(group1_coefficients.values())[0])
+        flattened_values = [y for x in list(group1_coefficients[keys[0]].values()) for y in x]
+        total_n_prns = len(flattened_values)
+        number_valid_constellations = len(group1_coefficients[keys[0]])
+        rows = total_n_prns * intervals_a_day
 
-        rows = n_prns * intervals_a_day
-        f = np.zeros([rows, 1], dtype=float)
+        f = np.zeros([rows, number_valid_constellations], dtype=float)
+
         pivot = 0
-
         for element in group1_coefficients:
-            f[pivot:pivot + n_prns, 0] = group1_coefficients[element]
-            pivot += n_prns
+            for c, const in enumerate(group1_coefficients[element]):
+                n_prns = len(group1_coefficients[element][const])
+                f[pivot:pivot + n_prns, c] = group1_coefficients[element][const]
+                pivot += n_prns
 
         return f
 
@@ -356,15 +415,17 @@ class BiasEstimation:
         :param group1_coefficients:
         :return: A numpy E matrix
         """
+        keys = list(group1_coefficients.keys())
         intervals_a_day = len(list(group1_coefficients.keys()))
-        n_prns = len(list(group1_coefficients.values())[0])
+        flattened_values = [y for x in list(group1_coefficients[keys[0]].values()) for y in x]
+        total_n_prns = len(flattened_values)
 
-        e = np.zeros([intervals_a_day * n_prns, intervals_a_day], dtype=float)
+        e = np.zeros([total_n_prns * intervals_a_day, intervals_a_day], dtype=float)
 
-        for col in range(intervals_a_day):
-            initial_row = col * n_prns
-            final_row = initial_row + n_prns
-            e[initial_row:final_row, col] = 1
+        for f, frac in enumerate(group1_coefficients):
+            initial_row = f * total_n_prns
+            final_row = initial_row + total_n_prns
+            e[initial_row:final_row, f] = 1
 
         return e
 
@@ -390,16 +451,19 @@ class BiasEstimation:
         :param group1_coefficients:
         :return: A numpy P matrix
         """
+        keys = list(group1_coefficients.keys())
         intervals_a_day = len(list(group1_coefficients.keys()))
-        n_prns = len(list(group1_coefficients.values())[0])
+        flattened_values = [y for x in list(group1_coefficients[keys[0]].values()) for y in x]
+        total_n_prns = len(flattened_values)
+        rows = total_n_prns * intervals_a_day
 
-        rows = n_prns * intervals_a_day
-        p = np.zeros([rows, rows], dtype=float)
         pivot = 0
-
+        p = np.zeros([rows, rows], dtype=float)
         for element in group1_coefficients:
-            np.fill_diagonal(p[pivot:pivot + rows, pivot:pivot + rows], group1_coefficients[element])
-            pivot += len(group1_coefficients[element])
+            for c, const in enumerate(group1_coefficients[element]):
+                n_prns = len(group1_coefficients[element][const])
+                np.fill_diagonal(p[pivot:pivot + rows, pivot:pivot + rows], group1_coefficients[element][const])
+                pivot += n_prns
 
         return p
 
@@ -411,19 +475,23 @@ class BiasEstimation:
         :param group2_coefficients:
         :return: A numpy L matrix
         """
+        keys = list(group2_coefficients.keys())
         intervals_a_day = len(list(group2_coefficients.keys()))
-        n_prns = len(list(group2_coefficients.values())[0])
+        flattened_values = [y for x in list(group2_coefficients[keys[0]].values()) for y in x]
+        total_n_prns = len(flattened_values)
+        rows = total_n_prns * intervals_a_day
 
-        l = np.zeros([n_prns * intervals_a_day, 1], dtype=float)
-
-        for i, fraction in enumerate(group2_coefficients):
-            initial = i * n_prns
-            final = initial + n_prns
-            l[initial:final, 0] = group2_coefficients[fraction]
+        pivot = 0
+        l = np.zeros([rows, 1], dtype=float)
+        for element in group2_coefficients:
+            for c, const in enumerate(group2_coefficients[element]):
+                n_prns = len(group2_coefficients[element][const])
+                l[pivot:pivot + n_prns, 0] = group2_coefficients[element][const]
+                pivot += n_prns
 
         return l
 
-    def estimate_bias(self, tec):
+    def estimate_bias(self, tec, constellations):
         """
         The bias estimate comprises the resolution of a equation system, which can be represented by a set of matrixes.
         The unknowns are built over averages values over the day, as shown in Otsuka et al. 2002. The solution, however,
@@ -431,22 +499,25 @@ class BiasEstimation:
         and receiver bias (B) is given by inv(A^T P A) * (A^T P L)
 
         :param tec: The measures of the current rinex
+        :param constellations:
         :return: The settings.INTERVAL_A_DAY elements corresponding to averages TEC over the day, more one last value,
         corresponding to the receptor/receiver bias
         """
+        matrixes = {}
         bias = {}
 
         logging.info(">> Preparing coefficients...")
-        coefficients = self._build_coefficients(tec)
+        coefficients = self._build_coefficients(tec, constellations)
 
         logging.info(">> Split intervals in each {}...".format(settings.TEC_RESOLUTION_ESTIMATION))
         intervals_a_day = len(list(coefficients['group_1'].keys()))
 
         logging.info(">> Building matrix A...")
         a = self._build_matrix_a(coefficients['group_1'])
+        at = np.transpose(a)
+
         logging.info(">> Building matrix P...")
         p = self._build_matrix_p(coefficients['group_1'])
-        at = np.transpose(a)
 
         logging.info(">> Building matrix L...")
         l = self._build_matrix_l(coefficients['group_2'])
@@ -454,40 +525,49 @@ class BiasEstimation:
 
         if a.shape[0] != p.shape[0]:
             logging.error(">>>> Matrix A dimension ({}) in row, does not match with P ({}). There is "
-                          "something wrong! Process stopped!".format(a.shape, p.shape))
-            sys.exit()
+                          "something wrong! Process stopped!\n".format(a.shape, p.shape))
+            raise Exception(">>>> Matrix A dimension ({}) in row, does not match with P ({}). There is "
+                            "something wrong! Process stopped!\n".format(a.shape, p.shape))
 
         if p.shape[0] != l.shape[0]:
             logging.error(">>>> Matrix P dimension ({}) in row, does not match with L ({}) in row. There is "
-                          "something wrong! Process stopped!".format(p.shape, l.shape))
-            sys.exit()
+                          "something wrong! Process stopped!\n".format(p.shape, l.shape))
+            raise Exception(">>>> Matrix P dimension ({}) in row, does not match with L ({}) in row. There is "
+                            "something wrong! Process stopped!\n".format(p.shape, l.shape))
 
         logging.info(">>>> Matrix A ({}), P ({}), and L ({}) successful built!".format(a.shape, p.shape, l.shape))
-
         logging.info(">> Estimating daily TEC and receiver bias...")
-        inv_atpa = np.linalg.inv(at.dot(p).dot(a))
-        atpl = at.dot(p).dot(l)
-        b = inv_atpa.dot(atpl)
 
-        if b.shape[0] != (intervals_a_day + 1):
-            logging.error(">>>> Matrix B dimension ({}), does not match with the number of TEC by day ({}) and "
-                          "receiver bias estimation (1). There is something wrong! "
-                          "Process stopped!".format(b.shape, intervals_a_day))
-            sys.exit()
+        term1 = np.dot(at, p)
+        term2 = np.dot(term1, a)
+        inv_atpa = np.linalg.inv(term2)
+        atpl = np.dot(term1, l)
+        b = np.dot(inv_atpa, atpl)
+
+        if b.shape[0] != (intervals_a_day + len(constellations)):
+            logging.error(">>>> Matrix B dimension, does not match with the number of TEC by day ({}) and "
+                          "receiver bias estimation ({}). There is something wrong! "
+                          "Process stopped!\n".format(b.shape, intervals_a_day, len(constellations)))
+            raise Exception(">>>> Matrix B dimension, does not match with the number of TEC by day ({}) and "
+                            "receiver bias estimation ({}). There is something wrong! "
+                            "Process stopped!\n".format(b.shape, intervals_a_day, len(constellations)))
         else:
-            logging.info(">>>> Matrix B successful calculated! {} TEC estimation every {} a day ({} fractions), "
-                         "plus, 1 receiver bias: {} and {}".format(b.shape, settings.TEC_RESOLUTION_ESTIMATION,
-                                                                   intervals_a_day, np.transpose(b[0:-1]), b[-1]))
+            logging.info(">>>> Matrix B successful calculated! TEC estimation every {} a day ({} fractions), "
+                         "plus, {} receiver bias: {} and {}!".format(settings.TEC_RESOLUTION_ESTIMATION,
+                                                                     intervals_a_day, len(constellations),
+                                                                     np.transpose(b[0:(len(b)-len(constellations))]),
+                                                                     b[len(b)-len(constellations):len(b)]))
 
-        bias['coefficients'] = coefficients
-        bias['A'] = a
-        bias['P'] = p
-        bias['L'] = l
-        bias['invATPA'] = inv_atpa
-        bias['ATPL'] = atpl
+        matrixes['A'] = a.tolist()
+        matrixes['P'] = p.tolist()
+        matrixes['L'] = l.tolist()
+        matrixes['invATPA'] = inv_atpa.tolist()
+        matrixes['ATPL'] = atpl.tolist()
+
+        b = [y for x in b.tolist() for y in x]
         bias['B'] = b
 
-        return bias
+        return matrixes, bias
 
 
 class QualityControl:
@@ -557,11 +637,13 @@ class QualityControl:
 
         return residuals
 
-    def check_quality(self, tec, folder, file):
+    def check_quality(self, obs, tec, constellations, folder, file):
         """
         From the quality metrics of each estimate value, check if the bias estimation is needed or not
 
+        :param obs: Panda object describing the rinex file measures
         :param tec: Dict with the measures of the current rinex
+        :param constellations:
         :param folder: Absolute path to the rinex's folder
         :param file: Rinex filename
         :return: Returns the array of tec and bias, estimated after to consider possible noisy in rinex measures
@@ -574,28 +656,43 @@ class QualityControl:
 
         # 1o controle de qualidade a se aplicar ---------------------------
         if tec['quality']['var'] > settings.THRESHOLD_VARIANCE_BIAS:
-            logging.info(">>>>>> Variance above limit. The measures may not be good. Using only part of "
-                         "the day: {}h until {}h...".format(settings.INITIAL_HOUR_RECALC_BIAS,
-                                                            settings.FINAL_HOUR_RECALC_BIAS))
+            logging.info(">> Variance above limit (Limit: {}; Variance a posteriori = {}). The measures may "
+                         "not be good. Using only part of the day: {}h until {}h...".
+                         format(settings.THRESHOLD_VARIANCE_BIAS,
+                                tec['quality']['var'],
+                                settings.INITIAL_HOUR_RECALC_BIAS,
+                                settings.FINAL_HOUR_RECALC_BIAS))
 
-            hdr, obs = input_files.prepare_rinex_partial(folder, file)
+            path, year, month, doy = input_files.setup_rinex_name(folder, file)
+            initial_date = datetime.datetime(int(year), 1, 1, settings.INITIAL_HOUR_RECALC_BIAS, 0) + \
+                           datetime.timedelta(int(doy) - 1)
+            final_date = datetime.datetime(int(year), 1, 1, settings.FINAL_HOUR_RECALC_BIAS, 0) + \
+                         datetime.timedelta(int(doy) - 1)
 
-            if obs is None:
-                logging.info(">>>>>>>> No measures were made during this period of the day! Bias reestimation skipped!")
-            else:
-                tec['time'] = utils.array_timestamp_to_datetime(obs.time)
-                restimated_bias = bias_estimation.estimate_bias(tec)
+            # i = initial_date <= obs.time <= final_date
+            # range = settings.INITIAL_HOUR_RECALC_BIAS <= obs.time <= settings.FINAL_HOUR_RECALC_BIAS
+            # obs_reduced = obs.isel(range)
 
-        # TODO: 2o controle de qualidade a se aplicar: remoção dos resíduos
+            # if obs is None:
+            #     logging.info(">>>>>>>> No measures were made during this period of the day! Bias reestimation skipped!")
+            # else:
+            #     tec['time'] = utils.restrict_datearray(tec['time'], initial_date, final_date)
+            #     restimated_bias = bias_estimation.estimate_bias(tec, constellations)
+        else:
+            restimated_bias = tec['bias']
+
+        # 2o controle de qualidade a se aplicar ---------------------------
         std_residuals = np.std(tec['quality']['residuals'])
         indexes_of_high_residuals = np.argwhere(np.std(tec['quality']['residuals']) >= (std_residuals * 2))
         if len(indexes_of_high_residuals) > 0:
-            # ALGORITMO <------
-            logging.info(">>>>>> {} residuals found. Recalculation bias...".format(len(indexes_of_high_residuals)))
+            # TODO: Incluir 2o controle de qualidade neste ponto, que consiste na remoção dos resíduos
+            logging.info(">> {} residuals found. Recalculation bias...".format(len(indexes_of_high_residuals)))
+        else:
+            restimated_bias = tec['bias']
 
         return restimated_bias
 
-    def quality_control(self, bias):
+    def quality_control(self, matrixes, bias):
         """
         The quality control corresponds to the process of extracting metrics of quality, such as residuals, variance,
         and standard deviation. Through these metrics, it is possible to check if the estimates were made under a noisy
@@ -604,25 +701,33 @@ class QualityControl:
         :param bias: Object with the receptor estimate bias
         :return: The updated TEC object, now, with the quality of rinex measures, TEC, and bias estimation
         """
-        quality = {}
+        quality_meas = {}
 
-        A = bias['A']
-        L = bias['L']
-        P = bias['P']
-        B = bias['B']
-        ATPL = bias['ATPL']
-        invATPA = bias['invATPA']
+        A = np.array(matrixes['A'])
+        L = np.array(matrixes['L'])
+        P = np.array(matrixes['P'])
+        B = np.array(bias['B'])
+        ATPL = np.array(matrixes['ATPL'])
+        invATPA = np.array(matrixes['invATPA'])
 
-        quality['var'] = self._var(A, P, L, B, ATPL)
-        logging.info(">> Variance a posteriori: {}".format(quality['var']))
+        var = self._var(A, P, L, B, ATPL)
+        logging.info(">> Calculating variance a posteriori...")
+        quality_meas['var'] = var.item()
+        # logging.info(">> Variance a posteriori: {}".format(quality_meas['var']))
 
-        quality['accuracy'] = self._accuracy(invATPA)
-        logging.info(">> Accuracy: {}".format(quality['accuracy']))
+        accuracy = self._accuracy(invATPA)
+        logging.info(">> Calculating accuracy...")
+        quality_meas['accuracy'] = accuracy.tolist()
+        # logging.info(">> Accuracy: {}".format(quality_meas['accuracy']))
 
-        quality['quality'] = self._quality(invATPA, quality['var'])
-        logging.info(">> Quality: {}".format(quality['quality']))
+        quality = self._quality(invATPA, quality_meas['var'])
+        logging.info(">> Calculating quality...")
+        quality_meas['quality'] = quality.tolist()
+        # logging.info(">> Quality: {}".format(quality_meas['quality']))
 
-        quality['residuals'] = self._residuals(A, L, B)
-        logging.info(">> Residuals: {}".format(np.transpose(quality['residuals'])))
+        residuals = self._residuals(A, L, B)
+        logging.info(">> Calculating residuals...")
+        quality_meas['residuals'] = residuals.tolist()
+        # logging.info(">> Residuals: {}".format(np.transpose(quality_meas['residuals'])))
 
-        return quality
+        return quality_meas
