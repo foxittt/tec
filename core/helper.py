@@ -11,16 +11,167 @@ import numpy as np
 import scipy.interpolate as interp
 import dateparser
 
-import settings as settings
+import matplotlib
 
-from app.downloads import DownloadDCB, DownloadOrbit, DownloadGlonassChannel
-from app.parser import ParserChannels, ParserRinexChannels, ParserOrbit, ParserDCB
+matplotlib.use('agg')
+import matplotlib.pyplot as plt
+
+from mpl_toolkits.basemap import Basemap
+from pandas.plotting import register_matplotlib_converters
+
+register_matplotlib_converters()
+
+import core.settings as settings
+
+from core.app.downloads import DownloadDCB, DownloadOrbit, DownloadGlonassChannel
+from core.app.parser import ParserChannels, ParserRinexChannels, ParserOrbit, ParserDCB
 
 
 class Utils:
     """
     Python utils, converting and dealing with variable types
     """
+
+    @staticmethod
+    def plot_absolute_vertical(prn, absolute, vertical):
+        fig, ax = plt.subplots(2, 1)
+
+        ax[0].set_title(prn)
+
+        ax[0].plot(absolute)
+        ax[0].set_ylabel('absolute')
+        ax[0].grid(True)
+
+        ax[1].plot(vertical)
+        ax[1].set_ylabel('vertical')
+        ax[1].grid(True)
+
+        fig.savefig(prn + "_absolute_vertical.pdf")
+
+    @staticmethod
+    def plot_relative(prn, cycle_slip, rtec):
+        fig, ax = plt.subplots(2, 1)
+
+        ax[0].set_title(prn)
+
+        ax[0].plot(cycle_slip)
+        ax[0].set_ylabel('rTEC-cycle_slip')
+        ax[0].grid(True)
+
+        ax[1].plot(rtec)
+        ax[1].set_ylabel('rTEC')
+        ax[1].grid(True)
+
+        fig.savefig(prn + "_rTEC.pdf")
+
+    @staticmethod
+    def plot_dtrended(prn, l1, l2, array1, array2, array3):
+        fig, axs = plt.subplots(5, 1)
+
+        axs[0].set_title(prn)
+
+        axs[0].plot(array1)
+        axs[0].set_ylabel('sTEC')
+        axs[0].grid(True)
+
+        axs[1].plot(array2)
+        axs[1].set_ylabel('savgol')
+        axs[1].grid(True)
+
+        axs[2].plot(array3)
+        axs[2].set_ylabel('dtec')
+        axs[2].grid(True)
+
+        axs[3].plot(l1)
+        axs[3].set_ylabel('l1')
+        axs[3].grid(True)
+
+        axs[4].plot(l2)
+        axs[4].set_ylabel('l2')
+        axs[4].grid(True)
+
+        fig.savefig(prn + "_dTEC.pdf")
+
+    @staticmethod
+    def plot_slant(prn, slant_factor, ang_zenital, ang_elev, lat_pp, long_pp):
+        fig, axs = plt.subplots(5, 1)
+
+        axs[0].plot(slant_factor)
+        axs[0].set_title(prn)
+        axs[0].set_ylabel('slant_factor')
+        axs[0].grid(True)
+
+        axs[1].plot(ang_zenital)
+        axs[1].set_ylabel('ang_zenital')
+        axs[1].grid(True)
+
+        axs[2].plot(ang_elev)
+        axs[2].set_ylabel('ang_elev')
+        axs[2].grid(True)
+
+        axs[3].plot(lat_pp)
+        axs[3].set_ylabel('lat_pp')
+        axs[3].grid(True)
+
+        axs[4].plot(long_pp)
+        axs[4].set_ylabel('long_pp')
+        axs[4].grid(True)
+
+        fig.savefig(prn + "_slant.pdf")
+
+    @staticmethod
+    def plot_lat_lon_pp_over_map(plt, lat, long, elevation, prn):
+        """
+
+        :param lat:
+        :param long:
+        :param elevation:
+        :param prn:
+        :return:
+        """
+        lat_30 = []
+        long_30 = []
+        elevation_30 = []
+
+        fig, ax = plt.subplots(figsize=(12, 7))
+
+        pos_elv_30 = [i for i, x in enumerate(elevation) if x >= 30]
+
+        for pos in pos_elv_30:
+            lat_30.append(lat[pos])
+            long_30.append(long[pos])
+            elevation_30.append(elevation[pos])
+
+        zoom_scale = 1
+        bbox = [np.min(lat_30) - zoom_scale, np.max(lat_30) + zoom_scale, \
+                np.min(long_30) - zoom_scale, np.max(long_30) + zoom_scale]
+
+        # m = Basemap(projection='merc', llcrnrlat=bbox[0], urcrnrlat=bbox[1], llcrnrlon=bbox[2], urcrnrlon=bbox[3],
+        #             lat_ts=10, resolution='i')
+        m = Basemap(projection='ortho', lon_0=bbox[2], lat_0=bbox[0], resolution='l')
+
+        m.drawcoastlines()
+        m.fillcontinents(color='#CCCCCC', lake_color='lightblue')
+
+        m.drawparallels(np.arange(bbox[0], bbox[1], (bbox[1] - bbox[0]) / 5), labels=[1, 0, 0, 0])
+        m.drawmeridians(np.arange(bbox[2], bbox[3], (bbox[3] - bbox[2]) / 5), labels=[0, 0, 0, 1], rotation=15)
+        m.drawmapboundary(fill_color='lightblue')
+
+        alt_min = np.min(elevation_30)
+        alt_max = np.max(elevation_30)
+        cmap = plt.get_cmap('gist_earth')
+        normalize = matplotlib.colors.Normalize(vmin=alt_min, vmax=alt_max)
+
+        for ii in range(0, len(elevation_30)):
+            x, y = m(long_30[ii], lat_30[ii])
+            color_interp = np.interp(elevation_30[ii], [alt_min, alt_max], [50, 200])
+            plt.plot(x, y, markersize=1, marker='o', color=cmap(int(color_interp)))
+
+        cax, _ = matplotlib.colorbar.make_axes(ax)
+        cbar = matplotlib.colorbar.ColorbarBase(cax, cmap=cmap, norm=normalize, label='Elevation')
+
+        plt.savefig('latlon_pp_' + prn + '.pdf', dpi=90, transparent=True)
+
     @staticmethod
     def array_timestamp_to_datetime(array_timestamp):
         """
@@ -35,7 +186,6 @@ class Utils:
             array.append(dateparser.parse(str(item)))
 
         return array
-
 
     @staticmethod
     def restrict_datearray(date_array, initial, final):
@@ -68,12 +218,15 @@ class Utils:
         return array
 
     @staticmethod
-    def rinex_str_date_to_datetime(string_date):
+    def rinex_str_date_to_datetime(hdr):
         """
         From rinex string timestamps, return the right datetime
-        :param string_date:
-        :return:
+
+        :param hdr: Rinex header informations
+        :return: A date in datetime format
         """
+        string_date = hdr[str(settings.TIME_LAST_OBS[str(hdr['version'])])]
+
         m = re.search(settings.REGEX_RINEX_DATE, string_date)
         year = int(m.group(1))
         month = int(m.group(2))
@@ -82,7 +235,12 @@ class Utils:
         minute = int(m.group(5))
         second = int(float(m.group(6)))
 
-        return datetime.datetime(year, month, day, hour, minute, second)
+        if hdr['version'] == 2.11:
+            date = datetime.datetime(year, month, day, 23, 59, (60 - int(hdr['interval'])))
+        else:
+            date = datetime.datetime(year, month, day, hour, minute, second)
+
+        return date
 
     @staticmethod
     def interpolate_orbit(orbit, hdr):
@@ -94,12 +252,11 @@ class Utils:
         :return: The python orbit object with the same precise than rinex, with interpolated values
         """
         orbit_interpolated = {}
-        rinex_last_obs_time = Utils.rinex_str_date_to_datetime(hdr['TIME OF LAST OBS'])
+        rinex_last_obs_time = Utils.rinex_str_date_to_datetime(hdr)
 
         sat_date = orbit['date']
         date_array_interpolated = np.array([])
 
-        # interpolate times
         aux_date = sat_date[0]
         date_array_interpolated = np.append(date_array_interpolated, sat_date[0])
         while aux_date < rinex_last_obs_time:
@@ -137,6 +294,88 @@ class Utils:
             orbit_interpolated[prn] = pos_aux
 
         return orbit_interpolated
+
+    @staticmethod
+    def detect_gap(initial_date, final_date):
+        """
+        Compare two dates, verify if they are too distant from each other
+
+        :param initial_date: Initial date to be compared
+        :param final_date: Final date to be compared
+        :return: True for gaps, False if the dates are close
+        """
+        t1 = initial_date.hour / 24.0 + initial_date.minute / 1440.0 + initial_date.second / 86400.0
+        t2 = final_date.hour / 24.0 + final_date.minute / 1440.0 + final_date.second / 86400.0
+
+        if t2 - t1 > settings.ARC_GAP_TIME:
+            return True
+        else:
+            return False
+
+    @staticmethod
+    def check_arc_gaps(tec, factor, p2_or_c2, p1_or_c1, prn):
+        """
+        Calculate the ambiguous phase bias, and subtract it from the relative TEC
+
+        :param tec: The dict python object, with all TEC parameters calculated
+        :param factor: The factor TEC
+        :param p2_or_c2: The column name for P2 or C2
+        :param p1_or_c1: The column name for P1 or C1
+        :param prn: The current string PRN: e.g. 'PRN'
+        :return:
+        """
+        p_relative = np.array(tec['relative-l1-l2'][prn][0])
+        p_relative_without_nan = p_relative[~np.isnan(p_relative)]
+
+        p_relative_pos = np.where(np.isnan(p_relative))[0]
+        p1_c1_nan_pos = np.where(np.isnan(p1_or_c1))[0]
+        p2_c2_nan_pos = np.where(np.isnan(p2_or_c2))[0]
+
+        c = np.concatenate([p_relative_pos, p1_c1_nan_pos, p2_c2_nan_pos], axis=0)
+        unique_pos = np.unique(c)
+
+        p_relative[unique_pos] = np.nan
+        p1_or_c1[unique_pos] = np.nan
+        p2_or_c2[unique_pos] = np.nan
+
+        p1_or_c1_without_nan = p1_or_c1[~np.isnan(p1_or_c1)]
+        p2_or_c2_without_nan = p2_or_c2[~np.isnan(p2_or_c2)]
+
+        time = np.array(tec['time'])
+        time_without_nan = time[~np.isnan(p_relative)]
+
+        narc = 1
+        jlast = 0
+        a_without_nan = p2_or_c2_without_nan - p1_or_c1_without_nan
+        b = p_relative_without_nan[0] - a_without_nan[0]
+
+        for j in range(1, len(a_without_nan)):
+            if Utils().detect_gap(time_without_nan[j-1], time_without_nan[j]):
+                b /= narc
+                for k in range(jlast, j):
+                    p_relative_without_nan[k] = factor * (p_relative_without_nan[k] - b)
+
+                jlast = j
+                narc = 1
+                a_without_nan[j] = p2_or_c2_without_nan[j] - p1_or_c1_without_nan[j]
+                b = p_relative_without_nan[j] - a_without_nan[j]
+            else:
+                narc += 1
+                a_without_nan[j] = p2_or_c2_without_nan[j] - p1_or_c1_without_nan[j]
+                b += p_relative_without_nan[j] - a_without_nan[j]
+
+        b /= narc
+        for k in range(jlast, len(a_without_nan)):
+            p_relative_without_nan[k] = factor * (p_relative_without_nan[k] - b)
+
+        nan_pos_in_p_relative = np.where(np.isnan(p_relative))
+        nan_pos_in_p_relative = np.array(nan_pos_in_p_relative).flatten().tolist()
+        for i in range(len(nan_pos_in_p_relative)):
+            nan_pos_in_p_relative[i] -= i
+
+        p_relative = np.insert(p_relative_without_nan, nan_pos_in_p_relative, np.nan)
+
+        return p_relative
 
     @staticmethod
     def convert_dcb_ns_to_meter(dcb):
@@ -205,21 +444,25 @@ class Utils:
 
         :param factor_glonass: GLONASS factor, with factors values for GLONASS constellation
         :param dcb: Dict object with bias of C1-P1 and P2-P1
-        :param constellation: The constellation verified: 'G', 'R', etc
         :param prn: The satellite code (PRN) verified: '01', '02', etc
         :return: In case the data are not available, it returns the default values. For instance, the value of 0 for DCB
         indicates it has no compensation under a respective equation
         """
-        dcb_compensate = 0
         input = InputFiles()
 
         f1, f2, f3, factor_1, factor_2, factor_3 = input.frequency_by_constellation(prn, factor_glonass)
 
-        if prn not in dcb['P1-P2'] or prn[1:] not in factor_glonass:
+        if prn not in dcb['P1-P2']:
             logging.info(">>>>>> Relative TEC for {} constellation, was not compensate due to "
                          "the lack of DCB/factor GLONASS for PRN {}".format(prn[0:1], prn))
-        else:
-            dcb_compensate = dcb['P1-P2'][prn][0]
+            return
+
+        if prn[0:1] is 'R' and prn[1:] not in factor_glonass:
+            logging.info(">>>>>> Relative TEC for {} constellation, was not compensate due to "
+                         "the lack of DCB/factor GLONASS for PRN {}".format(prn[0:1], prn))
+            return
+
+        dcb_compensate = dcb['P1-P2'][prn][0]
 
         return factor_3, dcb_compensate
 
@@ -228,6 +471,7 @@ class InputFiles:
     """
     Complementary methods to download all the input files needed for TEC and Bias estimation procedures
     """
+
     @staticmethod
     def setup_rinex_name(rinex_folder, rinex_name):
         """
@@ -279,11 +523,11 @@ class InputFiles:
         Prepare the inputs, such as the correct name and paths before actually download it. The files, in this case,
         can only be DCB or Orbit
 
+        :param hdr: Current rinex header. If there is at least one constellation without L1P column, the DCB is
+        then downloaded. Otherwise, the L1P measures are already sufficient and the download is skipped
         :param year: String year [YYYY]
         :param month: String month [mm]
         :param day: String day [dd]
-        :param rinex_hdr: Current rinex header. If there is at least one constellation without L1P column, the DCB is
-        then downloaded. Otherwise, the L1P measures are already sufficient and the download is skipped
         :param file_type: The file type to be downloaded. It might be 'DCB' or 'Orbit'
         :return: Python object with a parsed file
         """
@@ -291,7 +535,6 @@ class InputFiles:
         year = kwargs.get('year')
         month = kwargs.get('month')
         day = kwargs.get('day')
-        rinex_hdr = kwargs.get('rinex_hdr')
         file_type = kwargs.get('file_type')
 
         col_var = settings.COLUMNS_IN_RINEX[str(hdr['version'])]
@@ -299,11 +542,11 @@ class InputFiles:
         if file_type == "DCB":
             l1p_present = True
 
-            for item in rinex_hdr['fields']:
+            for item in hdr['fields']:
                 if item not in settings.CONSTELATIONS:
                     continue
 
-                if col_var[item]['P1'] not in rinex_hdr['fields'][item]:
+                if col_var[item]['P1'] not in hdr['fields'][item]:
                     l1p_present = False
                     break
 
@@ -341,6 +584,8 @@ class InputFiles:
         :param hdr: Current rinex header
         :param obs: The current rinex measures to be updated
         :param dcb_m: DCB values in meter unit
+        :param columns: The string columns names, according to each existent constellation
+        :param constellations: Which constellations was eligible to be used during the calculus
         :return: The updated current rinex with P1 values calculated through C1 and DCB
         """
         if not dcb_m:
@@ -367,23 +612,25 @@ class InputFiles:
         """
         Check if the current rinex version obey the required one
 
-        :param hdr:
-        :param file:
-        :return:
+        :param hdr: Current header file
+        :param file: String name file
+        :return: If the current rinex version is smaller than required, the process will throw an exception
         """
-        if hdr['version'] < settings.MIN_REQUIRED_VERSION:
+        if hdr['version'] < float(settings.MIN_REQUIRED_VERSION):
             logging.error(">>>>>> Version {} required. Current version {}. "
-                          "Process stopped for rinex {}!".format(settings.REQUIRED_VERSION, hdr['version'], file))
+                          "Process stopped for rinex {}!".format(settings.MIN_REQUIRED_VERSION, hdr['version'], file))
             raise Exception(">>>>>> Version {} required. Current version {}. "
-                            "Process stopped for rinex {}!".format(settings.REQUIRED_VERSION, hdr['version'], file))
+                            "Process stopped for rinex {}!".format(settings.MIN_REQUIRED_VERSION, hdr['version'], file))
 
     @staticmethod
     def frequency_by_constellation(prn, factor_glonass):
         """
+        Check values and factors according to the GNSS constellation
 
-        :param constellation:
-        :param factor_glonass:
-        :return:
+        :param prn: The current PRN: e.g. 'G01'
+        :param factor_glonass: Dict with all channels and' factors (by PRN) of GLONASS
+        :return: Returns the respective frequencies F1, F2, F3, and factors 1, 2, and 3
+        according to the GNSS constellation
         """
         f1 = 0
         f2 = 0
@@ -429,14 +676,28 @@ class InputFiles:
         cols_desired_in_rinex = settings.COLUMNS_IN_RINEX[str(hdr['version'])]
         cols_available_in_rinex = hdr['fields']
 
+        # TODO: ainda falha quando a versão é 2.11, na qual diz que todos as constelações desejadas
+        #  (settings.CONSTELATIONS), estao presentes no rinex, o que nem sempre é verdadeiro. Ao final,
+        #  "constellations" (variavel que guarda somente as constelacoes que possuem medidas) ainda mostrará
+        #  constelações que na verdade não possuem medidas no corpo do arquivo
         for const in cols_desired_in_rinex:
             if const in settings.CONSTELATIONS:
                 for col in cols_desired_in_rinex[const]:
-                    if const not in cols_available_in_rinex:
-                        continue
 
-                    if cols_desired_in_rinex[const][col] in cols_available_in_rinex[const]:
-                        aux_columns.append(cols_desired_in_rinex[const][col])
+                    if hdr['version'] == 2.11:
+                        if col not in cols_available_in_rinex:
+                            continue
+
+                        if cols_desired_in_rinex[const][col] not in cols_available_in_rinex:
+                            continue
+                    else:
+                        if const not in cols_available_in_rinex.keys():
+                            continue
+
+                        if cols_desired_in_rinex[const][col] not in cols_available_in_rinex[const]:
+                            continue
+
+                    aux_columns.append(cols_desired_in_rinex[const][col])
 
                 data_to_be_load[const] = aux_columns
                 aux_columns = []
@@ -480,7 +741,17 @@ class InputFiles:
 
             if cols_desired_in_rinex[const]['L2'] in data_to_be_load[const] and \
                     cols_desired_in_rinex[const]['L3'] in data_to_be_load[const]:
-                del data_to_be_load[const]['L3']
+                data_to_be_load[const].remove('L3')
+
+            # Based in some rinex, the column P1 is described in header rinex versions 2.11, but, in fact,
+            # the measures of P1 does not exist in the body. So, if the version is 2.11, C1 is always used
+            if hdr['version'] == 2.11 and cols_desired_in_rinex[const]['P1'] in data_to_be_load[const] and \
+                    cols_desired_in_rinex[const]['C1'] not in data_to_be_load[const]:
+                del data_to_be_load[const]
+
+            if hdr['version'] == 2.11 and cols_desired_in_rinex[const]['P1'] in data_to_be_load[const] and \
+                    cols_desired_in_rinex[const]['C1'] in data_to_be_load[const]:
+                data_to_be_load[const].remove('P1')
 
         constellations = list(data_to_be_load.keys())
         flattened_columns = [y for x in list(data_to_be_load.values()) for y in x]
@@ -517,12 +788,6 @@ class InputFiles:
         calculation
 
         :param complete_path: The absolute path to the rinex
-        :param kwargs:
-            is_partial: boolean that specify the moment rinex is read.
-                Full-day: is_partial = False
-                Partial: is_partial = True
-            initial: ...
-            final: ...
         :return: The Python objects after to successful read the prev and rinex, it includes the header
         and measures of both files
         """
@@ -543,9 +808,9 @@ class InputFiles:
             raise Exception(">>>> This rinex ({}) does not have the measures required for the TEC and "
                             "bias estimation.\n".format(complete_path))
         else:
-            logging.info(">> Reading rinex measures...")
+            logging.info(">> Reading rinex measures... Only constellation(s) {} will "
+                         "be considered!".format(constellations))
             obs = gr.load(complete_path, meas=columns, use=constellations)
-            logging.info("Only constellation(s) {} will be considered!".format(constellations))
 
         return hdr, obs, columns, constellations, l1_col, l2_or_l3_col, p1_or_c1_col, p2_or_c2_col, l2_channel
 
@@ -606,7 +871,7 @@ class InputFiles:
                     }
         """
         logging.info(">> Downloading Orbit files...")
-        orbit = self.setup_file_and_download(hdr, year=year, month=month, day=day, rinex_hdr=hdr, file_type='Orbit')
+        orbit = self.setup_file_and_download(hdr, year=year, month=month, day=day, file_type='Orbit')
 
         logging.info(">> Checking precision in time of both files, rinex and orbit...")
         if not math.isnan(hdr['interval']):
@@ -663,7 +928,7 @@ class InputFiles:
                     }
         """
         logging.info(">> Downloading DCB files...")
-        dcb = self.setup_file_and_download(hdr, year=year, month=month, day=day, rinex_hdr=hdr, file_type='DCB')
+        dcb = self.setup_file_and_download(hdr, year=year, month=month, day=day, file_type='DCB')
 
         return dcb
 
@@ -679,7 +944,8 @@ class InputFiles:
         """
         path, year, month, doy = self.setup_rinex_name(folder, file)
 
-        hdr, obs, columns, constellations, l1_col, l2_or_l3_col, p1_or_c1_col, p2_or_c2_col, l2_channel = self._prepare_rinex(path)
+        hdr, obs, columns, constellations, l1_col, l2_or_l3_col, \
+        p1_or_c1_col, p2_or_c2_col, l2_channel = self._prepare_rinex(path)
         factor_glonass = self._prepare_factor(hdr, year, month, doy)
         orbit = self._prepare_orbit(hdr, year, month, doy)
         dcb = self._prepare_dcb(hdr, year, month, doy)
@@ -687,8 +953,8 @@ class InputFiles:
         logging.info(">> Converting DCB nanoseconds in meter unit...")
         dcb_m = Utils.convert_dcb_ns_to_meter(dcb)
 
-        logging.info(">> Checking the availability of P1 and P2...")
-        obs = self.compensating_c1_c2(hdr, obs, dcb_m, columns, constellations)
+        #logging.info(">> Checking the availability of P1 and P2...")
+        #obs = self.compensating_c1_c2(hdr, obs, dcb_m, columns, constellations)
 
         return hdr, obs, orbit, dcb, factor_glonass, l1_col, l2_or_l3_col, p1_or_c1_col, \
                p2_or_c2_col, l2_channel, constellations
@@ -712,6 +978,14 @@ class Geodesy:
         :param z_rec: Z axis receiver position value
         :return: Sub-ionospheric position array, corresponding to Lat, Long and Altitude, respectively
         """
+        x_rec /= 1000
+        y_rec /= 1000
+        z_rec /= 1000
+
+        x_sat = [x / 1000 for x in x_sat]
+        y_sat = [y / 1000 for y in y_sat]
+        z_sat = [z / 1000 for z in z_sat]
+
         x_sat = np.array(x_sat)
         y_sat = np.array(y_sat)
         z_sat = np.array(z_sat)

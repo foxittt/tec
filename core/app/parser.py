@@ -2,7 +2,7 @@ import re
 import logging
 from datetime import datetime
 
-import settings as settings
+import core.settings as settings
 
 
 class ParserGeneric:

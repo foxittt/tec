@@ -7,9 +7,9 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-import settings as settings
+import core.settings as settings
 
-from app.utils.helpers import Utils
+from core.app.utils.helpers import Utils
 
 
 class DownloadGeneric:

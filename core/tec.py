@@ -4,15 +4,15 @@ import logging
 import datetime
 import csv
 
-import settings as settings
-import helper as helper
-import estimate as calc
-import cycleslip.cycleslip as cs
+import core.settings as settings
+import core.helper as helper
+import core.estimate as calc
+import core.cycleslip.cycleslip as cs
 
 
 class TEC:
     """
-
+    Class with the main calls for TEC estimation (by station)
     """
     def simplify_dict(self, dict_var, list_keys):
         """
@@ -31,10 +31,10 @@ class TEC:
 
     def write_csv(self, path, tec, key):
         """
-
-        :param tec:
-        :param columns:
-        :param path:
+        Based on a dict (TEC), select the 'key' for printing all PRNs in columns in a CSV file format
+        :param path: Path to save the CSV file
+        :param tec: Dict object
+        :param key: Key to be printed
         :return:
         """
         time = tec['time']
@@ -77,8 +77,8 @@ class TEC:
 
         start = time.perf_counter()
 
-        logging.info("- {} - TEC by fractions of {} a day, and bias receiver estimation".
-                     format(file, settings.TEC_RESOLUTION_ESTIMATION))
+        logging.info("- {} - TEC by fractions of {} {} a day, and bias receiver estimation".
+                     format(file, settings.TEC_RESOLUTION_VALUE, settings.TEC_RESOLUTION))
         logging.info("Preparing inputs...")
         hdr, obs, orbit, dcb, factor_r, l1_col, l2_or_l3_col, p1_or_c1_col, p2_or_c2_col, l2_channel, \
         constellations = input_files.prepare_inputs(rinex_folder, file)
@@ -88,7 +88,7 @@ class TEC:
             'modification-date': datetime.datetime.utcnow(),
             'rinex-file': file,
             'rinex-path': os.path.join(rinex_folder, file),
-            'rinex-date': utils.rinex_str_date_to_datetime(hdr['TIME OF FIRST OBS']),
+            'rinex-date': utils.rinex_str_date_to_datetime(hdr),
             'rinex-precision': hdr['interval'],
             'keys-saved': settings.KEYS_SAVE,
             'constellations-desired': settings.CONSTELATIONS,
@@ -103,8 +103,11 @@ class TEC:
         tec['time'] = utils.array_timestamp_to_datetime(obs.time)
 
         try:
-            logging.info("Calculating slant factor...")
-            tec['slant'] = tec_estimation.slant(hdr, obs, orbit)
+            logging.info("Calculating slant factor for DTEC calculation...")
+            tec['slant-dtec'] = tec_estimation.slant(hdr, obs, orbit, 0)
+
+            logging.info("Calculating slant factor for TEC estimation...")
+            tec['slant'] = tec_estimation.slant(hdr, obs, orbit, 1)
 
             logging.info("Correcting Cycle-Slip...")
             tec['relative-l1-l2'] = cycle_slip.cycle_slip_analysis(obs, tec, factor_r, l1_col, l2_or_l3_col,
@@ -114,7 +117,7 @@ class TEC:
             tec['detrended'] = tec_estimation.detrended(tec, factor_r, l2_channel)
 
             logging.info("Calculating relative TEC...")
-            tec['relative-p1c1'] = tec_estimation.relative(obs, factor_r, dcb, p1_or_c1_col, p2_or_c2_col)
+            tec['relative'] = tec_estimation.relative(tec, obs, factor_r, dcb, p1_or_c1_col, p2_or_c2_col)
 
             logging.info("Estimating TEC and Bias with daily measurements...")
             tec['matrixes'], tec['bias'] = bias_estimation.estimate_bias(tec, constellations)
@@ -123,13 +126,15 @@ class TEC:
             tec['quality'] = quality_control.quality_control(tec['matrixes'], tec['bias'])
 
             logging.info("Filtering - filtering measures and error detection...")
-            tec['bias'] = quality_control.check_quality(obs, tec, constellations, rinex_folder, file)
+            # tec['bias'] = quality_control.check_quality(obs, tec, constellations, rinex_folder, file)
 
             logging.info("Calculating absolute TEC...")
             tec['absolute'] = tec_estimation.absolute(tec, constellations)
 
             logging.info("Calculating vertical TEC...")
             tec['vertical'] = tec_estimation.vertical(tec, orbit)
+
+            # utils.write_csv(tec, 'absolute.csv', tec[absolute])
 
         except Exception as e:
             logging.error(':::: EXCEPTION thrown during {} processing: {}! File skipped!\n'.format(file, e))

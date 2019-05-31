@@ -2,8 +2,8 @@ import datetime
 import logging
 
 import numpy as np
-import settings as settings
-import helper as helper
+import core.settings as settings
+import core.helper as helper
 
 from scipy.signal import find_peaks
 
@@ -53,6 +53,7 @@ class CycleSlip:
         """
         diff_rtec = rtec[index] - rtec[index-1]
         diff_mwlc = mwlc[index] - mwlc[index-1]
+
         var_1 = diff_mwlc * settings.C
         var_2 = var_1 / f1
         diff_2 = round((diff_rtec - var_2) * factor_2)
@@ -99,17 +100,16 @@ class CycleSlip:
         rtec_without_nan = rtec_without_nan[~np.isnan(rtec_without_nan)]
         mwlc_without_nan = mwlc_without_nan[~np.isnan(mwlc_without_nan)]
 
-        nan_pos = np.where(np.isnan(mwlc_nan))
-        nan_pos = np.array(nan_pos).flatten().tolist()
-        not_nan_pos = np.where(~np.isnan(mwlc_nan))
-        not_nan_pos = np.array(not_nan_pos).flatten().tolist()
+        nan_pos_in_rtec = np.where(np.isnan(rtec_nan))
+        nan_pos_in_rtec = np.array(nan_pos_in_rtec).flatten().tolist()
+        not_nan_pos_in_rtec = np.where(~np.isnan(rtec_nan))
+        not_nan_pos_in_rtec = np.array(not_nan_pos_in_rtec).flatten().tolist()
 
-        not_nan_pos = np.array(not_nan_pos).flatten().tolist()
-        not_nan_obs_time = [obs_time[x] for x in not_nan_pos]
-        l1_without_nan = [l1[x] for x in not_nan_pos]
-        l2_or_l3_without_nan = [l2_or_l3[x] for x in not_nan_pos]
-        p1_or_c1_without_nan = [p1_or_c1[x] for x in not_nan_pos]
-        p2_or_c2_without_nan = [p2_or_c2[x] for x in not_nan_pos]
+        not_nan_obs_time = [obs_time[x] for x in not_nan_pos_in_rtec]
+        l1_without_nan = [l1[x] for x in not_nan_pos_in_rtec]
+        l2_or_l3_without_nan = [l2_or_l3[x] for x in not_nan_pos_in_rtec]
+        p1_or_c1_without_nan = [p1_or_c1[x] for x in not_nan_pos_in_rtec]
+        p2_or_c2_without_nan = [p2_or_c2[x] for x in not_nan_pos_in_rtec]
 
         logging.info(">>>> Detecting peaks on the 4th order final differences in rTEC...")
         indexes = self._detect(rtec_without_nan, prn)
@@ -148,10 +148,10 @@ class CycleSlip:
                 p_dev = np.maximum(np.sqrt((add_tec_2 / 10) - pow(p_mean, 2)), settings.DIFF_TEC_MAX)
             else:
                 p_mean = 0
-                p_dev = settings.DIFF_TEC_MAX * 2.5
+                p_dev = settings.DIFF_TEC_MAX * settings.DIFF_TEC_MAX_FACTOR
 
-            pmin_tec = p_mean - p_dev * 2
-            pmax_tec = p_mean + p_dev * 2
+            pmin_tec = p_mean - p_dev * settings.P_MAX_CYCLE_SLIP
+            pmax_tec = p_mean + p_dev * settings.P_MAX_CYCLE_SLIP
             diff_rtec = rtec_without_nan[i] - rtec_without_nan[i-1]
 
             if not pmin_tec < diff_rtec and diff_rtec <= pmax_tec:
@@ -163,12 +163,12 @@ class CycleSlip:
                                                                                        mwlc_without_nan, f1, f2_or_f3,
                                                                                        factor_1, factor_2, i)
 
-        for i in range(len(nan_pos)):
-            nan_pos[i] -= i
+        for i in range(len(nan_pos_in_rtec)):
+            nan_pos_in_rtec[i] -= i
 
-        rtec_nan = np.insert(rtec_without_nan, nan_pos, np.nan)
-        l1_nan = np.insert(l1_without_nan, nan_pos, np.nan)
-        l2_or_l3_nan = np.insert(l2_or_l3_without_nan, nan_pos, np.nan)
+        rtec_nan = np.insert(rtec_without_nan, nan_pos_in_rtec, np.nan)
+        l1_nan = np.insert(l1_without_nan, nan_pos_in_rtec, np.nan)
+        l2_or_l3_nan = np.insert(l2_or_l3_without_nan, nan_pos_in_rtec, np.nan)
 
         rtec_nan = rtec_nan.tolist()
         l1_nan = l1_nan.tolist()
@@ -176,16 +176,26 @@ class CycleSlip:
 
         return rtec_nan, l1_nan, l2_or_l3_nan
 
-    def cycle_slip_analysis(self, obs, tec, factor_glonass, l1_col, l2_or_l3_col, p1_or_c1_col,
-                            p2_or_c2_col, l2_channel):
+    def cycle_slip_analysis(self, obs, tec, factor_glonass, l1_col, l2_or_l3_col,
+                            p1_or_c1_col, p2_or_c2_col, l2_channel):
         """
         Correct the lost of signals during the communications between satellites and receiver, usually called cycle-slip
         correction. It improves and help to get a more consistent estimate
 
         :param obs: Measures of a respective PRN, with content of L1, L2, C1 and P2
-        :param tec: The
-        :param factor_glonass:
-        :return:
+        :param tec: The dict python object, with all the TEC parameters calculated in the procedures before
+        :param factor_glonass: The GLONASS channels and factors, previous calculated
+        :param l1_col: L1 column name
+        :param l2_or_l3_col: Either the L2 or L3 measures might be used. Here, a string defined the name of the column
+        of the measure used
+        :param p1_or_c1_col: Either the P1 or C1 measures might be used. Here, a string defined the name of the column
+        of the measure used
+        :param p2_or_c2_col: Either the P2 or C2 measures might be used. Here, a string defined the name of the column
+        of the measure used
+        :param l2_channel: True or False, which says if the L2 was used or not, depending this information,
+        the frequencies F2 or F3 is used
+        :return: If discontinuies are detected, it will be corrected and the return will be the L1 and L2 measures
+        compensated with this shift caused by cycle-slip lost
         """
         input = helper.InputFiles()
         corrected = {}

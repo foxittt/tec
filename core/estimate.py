@@ -2,13 +2,12 @@ import logging
 import numpy as np
 import math
 import pyproj
-import warnings
 import datetime
 
 from scipy.signal import savgol_filter
 
-import settings as settings
-import helper as helper
+import core.settings as settings
+import core.helper as helper
 
 
 class TECEstimation:
@@ -17,17 +16,21 @@ class TECEstimation:
     and vertical estimation, besides the slant factor, which gives the ionopheric point where the TEC has been estimated
     """
 
-    def relative(self, obs, factor_glonass, dcb, p1_or_c1_col, p2_or_c2_col):
+    def relative(self, tec, obs, factor_glonass, dcb, p1_or_c1_col, p2_or_c2_col):
         """
         Calculate the pseudo-range or pseudo-distance, which is the first TEC calculation, called relative TEC or simply
         R TEC. The R TEC includes, then, not only the TEC, but also all the extra influences, such as atmosphere
         attenuations, and eletronic errors
 
-        :param hdr: The header the current rinex
+        :param tec: Dict with TEC python object
         :param obs: The measures of the current rinex
         :param factor_glonass: The channels values of each GLONASS PRNs to calc the selective factor
-        :param dcb: The parsed DCB object, with the satellites bias,
-        in order to subtract from relative TEC (in nanosecs)
+        :param dcb: The parsed DCB object, with the satellites bias, in order to
+        subtract from relative TEC (in nanosecs)
+        :param p1_or_c1_col: Either the P1 or C1 measures might be used. Here, a string defined the name of the column
+        of the measure used
+        :param p2_or_c2_col: Either the P2 or C2 measures might be used. Here, a string defined the name of the column
+        of the measure used
         :return: The python relative TEC object, which will content all the TEC calculations along the process
         """
         tec_r = {}
@@ -38,13 +41,19 @@ class TECEstimation:
 
         logging.info(">>>> Calculating relative TEC and removing satellite DCB...")
         for prn in obs.sv.values:
-            a = obs[p1_or_c1_col[prn[0:1]]].sel(sv=prn).values - obs[p2_or_c2_col[prn[0:1]]].sel(sv=prn).values
+            p2_or_c2 = obs[p2_or_c2_col[prn[0:1]]].sel(sv=prn).values
+            p1_or_c1 = obs[p1_or_c1_col[prn[0:1]]].sel(sv=prn).values
             factor, dcb_compensate = utils.check_availability(factor_glonass, dcb_tecu, prn)
-            tec_r[prn] = ((factor * a) - dcb_compensate).tolist()
+
+            relative = utils.check_arc_gaps(tec, factor, p2_or_c2, p1_or_c1, prn)
+
+            tec_r[prn] = (relative - dcb_compensate).tolist()
+
+            # utils.plot_relative(prn, tec['relative-l1-l2'][prn][0], tec_r[prn])
 
         return tec_r
 
-    def slant(self, hdr, obs, orbit):
+    def slant(self, hdr, obs, orbit, type):
         """
         Consists in a more accurate acquirement of each satellite's slant in the ionospheric point regarding a specific
         receiver.
@@ -52,15 +61,16 @@ class TECEstimation:
         :param hdr: The header the current rinex
         :param obs: The measures of the current rinex
         :param orbit: The python orbit object, with the daily and updated satellite locations
+        :param type: Type of parameters to be calculated (For DTEC (0) or bias estimation (1))
         :return: The updated TEC object, now, with slant factor calculated. The tec['slant'] dict:
             tec['slant'] = {
                     'G01' = [
-                              [DATE_ARRAY_OVER_THE_DAY], [ION_LAT_OVER_THE_DAY], [ION_LONG_OVER_THE_DAY],
-                              [ION_ALT_OVER_THE_DAY], [SLANT_F_OVER_THE_DAY], [ZEN_ANG_OVER_THE_DAY]
+                              [SLANT_FACTOR_OVER_THE_DAY], [ZENITAL_ANGLE_OVER_THE_DAY],
+                              [ELEVATION_OVER_THE_DAY], [LATITUDE_PP_OVER_THE_DAY], [LONG_PP_OVER_THE_DAY]
                             ],
                     'G02' = [
-                              [DATE_ARRAY_OVER_THE_DAY], [ION_LAT_OVER_THE_DAY], [ION_LONG_OVER_THE_DAY],
-                              [ION_ALT_OVER_THE_DAY], [SLANT_F_OVER_THE_DAY], [ZEN_ANG_OVER_THE_DAY]
+                              [SLANT_FACTOR_OVER_THE_DAY], [ZENITAL_ANGLE_OVER_THE_DAY],
+                              [ELEVATION_OVER_THE_DAY], [LATITUDE_PP_OVER_THE_DAY], [LONG_PP_OVER_THE_DAY]
                             ],
                     ...
             }
@@ -101,80 +111,97 @@ class TECEstimation:
             sat_z = utils.array_dict_to_array(orbit[prn], 'z')
             sat_z = [z * 1000 for z in sat_z]
 
-            diff_x = np.array([item - rec_x for item in sat_x])
-            diff_y = np.array([item - rec_y for item in sat_y])
-            diff_z = np.array([item - rec_z for item in sat_z])
+            if type is 0:
+                diff_x = np.array([item - rec_x for item in sat_x])
+                diff_y = np.array([item - rec_y for item in sat_y])
+                diff_z = np.array([item - rec_z for item in sat_z])
 
-            term1 = -cos_rec_x * sin_rec_y * diff_x
-            term2 = sin_rec_x * sin_rec_y * diff_y
-            term3 = cos_rec_y * diff_z
-            term4 = -sin_rec_x * diff_x
-            term5 = cos_rec_x * diff_y
-            term6 = cos_rec_x * cos_rec_y * diff_x
-            term7 = sin_rec_x * cos_rec_y * diff_y
-            term8 = sin_rec_y * diff_z
+                term1 = -cos_rec_x * sin_rec_y * diff_x
+                term2 = sin_rec_x * sin_rec_y * diff_y
+                term3 = cos_rec_y * diff_z
+                term4 = -sin_rec_x * diff_x
+                term5 = cos_rec_x * diff_y
+                term6 = cos_rec_x * cos_rec_y * diff_x
+                term7 = sin_rec_x * cos_rec_y * diff_y
+                term8 = sin_rec_y * diff_z
 
-            north = term1 - term2 + term3
-            east = term4 + term5
-            vertical = term6 + term7 + term8
-            vertical_norm = np.sqrt(np.power(cos_rec_x * cos_rec_y, 2) +
-                                    np.power(sin_rec_x * cos_rec_y, 2) +
-                                    np.power(sin_rec_y, 2))
+                north = term1 - term2 + term3
+                east = term4 + term5
+                vertical = term6 + term7 + term8
+                vertical_norm = np.sqrt(np.power(cos_rec_x * cos_rec_y, 2) +
+                                        np.power(sin_rec_x * cos_rec_y, 2) +
+                                        np.power(sin_rec_y, 2))
 
-            r = np.sqrt(np.power(diff_x, 2) + np.power(diff_y, 2) + np.power(diff_z, 2))
+                r = np.sqrt(np.power(diff_x, 2) + np.power(diff_y, 2) + np.power(diff_z, 2))
 
-            ion_x, ion_y, ion_z = geodesy.sub_ion_point(settings.ALT_IONO, sat_x, sat_y, sat_z, rec_x, rec_y, rec_z)
-            top_ion_x, top_ion_y, top_ion_z = geodesy.sub_ion_point(settings.ALT_IONO_TOP, sat_x, sat_y, sat_z,
-                                                                    rec_x, rec_y, rec_z)
-            bot_ion_x, bot_ion_y, bot_ion_z = geodesy.sub_ion_point(settings.ALT_IONO_BOTTOM, sat_x, sat_y, sat_z,
-                                                                    rec_x, rec_y, rec_z)
-            ion_lat, ion_long, ion_alt = geodesy.car_2_pol(ion_x, ion_y, ion_z)
+                ang_zenital = np.arccos(vertical / (r * vertical_norm))
+                ang_elev = ((dpi / 2) - ang_zenital) / degrad
+                slant_factor = np.arcsin((settings.EARTH_RAY / (settings.EARTH_RAY + settings.AVERAGE_HEIGHT)) *
+                                              np.cos(ang_elev * degrad))
+                slant_factor = np.cos(slant_factor)
 
-            average_height = settings.ALT_IONO_TOP - settings.ALT_IONO_BOTTOM
-            ang_zenital = np.arccos(vertical / (r * vertical_norm))
-            ang_elev = ((dpi / 2) - ang_zenital) / degrad
-            slant_factor = np.arcsin((settings.EARTH_RAY / (settings.EARTH_RAY + average_height)) *
-                                     np.cos(ang_elev * degrad))
+                azimute = np.arctan2(east, north)
+                azimute[azimute < 0] += (2 * math.pi)
+                azimute = azimute / degrad
 
-            slant_factor_java = pow(np.array(top_ion_x) - np.array(bot_ion_x), 2) + \
-                                pow(np.array(top_ion_y) - np.array(bot_ion_y), 2) + \
-                                pow(np.array(top_ion_z) - np.array(bot_ion_z), 2)
-            slant_factor_java = np.sqrt(slant_factor_java) / average_height
+                var1 = ang_elev * degrad
+                w = (dpi / 2) - var1 - np.arcsin(
+                    settings.EARTH_RAY / (settings.EARTH_RAY + settings.AVERAGE_HEIGHT) * np.cos(var1))
 
-            slant_factor = np.cos(slant_factor)
+                var2 = sin_rec_y * np.cos(w)
+                var3 = cos_rec_y * np.sin(w) * np.cos(azimute * degrad)
+                lat_pp = np.arcsin(var2 + var3)
 
-            azimute = np.arctan2(east, north)
-            azimute[azimute < 0] += (2 * math.pi)
-            azimute = azimute / degrad
+                var4 = np.sin(w) * np.sin(azimute * degrad)
+                long_pp = lon + np.arcsin(var4 / np.cos(lat_pp))
 
-            var1 = ang_elev * degrad
-            w = (dpi / 2) - var1 - np.arcsin(settings.EARTH_RAY / (settings.EARTH_RAY + average_height) * np.cos(var1))
+                lat_pp = lat_pp / degrad
+                long_pp = long_pp / degrad
 
-            var2 = sin_rec_y * np.cos(w)
-            var3 = cos_rec_y * np.sin(w) * np.cos(azimute * degrad)
-            lat_pp = np.arcsin(var2 + var3)
+                lat_pp = lat_pp.tolist()
+                long_pp = long_pp.tolist()
 
-            var4 = np.sin(w) * np.sin(azimute * degrad)
-            long_pp = lon + np.arcsin(var4 / np.cos(lat_pp))
+            elif type is 1:
+                ion_x, ion_y, ion_z = geodesy.sub_ion_point(settings.ALT_IONO, sat_x, sat_y, sat_z, rec_x, rec_y, rec_z)
+                top_ion_x, top_ion_y, top_ion_z = geodesy.sub_ion_point(settings.ALT_IONO_TOP, sat_x, sat_y, sat_z,
+                                                                        rec_x, rec_y, rec_z)
+                bot_ion_x, bot_ion_y, bot_ion_z = geodesy.sub_ion_point(settings.ALT_IONO_BOTTOM, sat_x, sat_y, sat_z,
+                                                                        rec_x, rec_y, rec_z)
 
-            lat_pp = lat_pp / degrad
-            long_pp = long_pp / degrad
+                lat_pp, long_pp, alt_pp = geodesy.car_2_pol(ion_x, ion_y, ion_z)
+
+                ang_zenital = geodesy.calc_zenital_angle(sat_x, sat_y, sat_z, rec_x, rec_y, rec_z)
+
+                ang_elev = ((dpi / 2) - ang_zenital) / degrad
+
+                slant_factor = pow(np.array(top_ion_x) - np.array(bot_ion_x), 2) + \
+                                    pow(np.array(top_ion_y) - np.array(bot_ion_y), 2) + \
+                                    pow(np.array(top_ion_z) - np.array(bot_ion_z), 2)
+                slant_factor = np.sqrt(slant_factor) / (settings.ALT_IONO_TOP - settings.ALT_IONO_BOTTOM)
+            else:
+                logging.error(">>>> Type of slant factor calculation is incorrect. The procedure will be "
+                              "interrupted for this file!")
+                raise Exception(">>>> Type of slant factor calculation is incorrect. The procedure will be "
+                                "interrupted for this file!")
 
             slant_factor = slant_factor.tolist()
+            ang_zenital = ang_zenital.tolist()
             ang_elev = ang_elev.tolist()
-            azimute = azimute.tolist()
-            lat_pp = lat_pp.tolist()
-            long_pp = long_pp.tolist()
 
-            tec_s[prn] = [slant_factor, ang_elev, azimute, lat_pp, long_pp]
+            # utils.plot_slant(prn, slant_factor, ang_zenital, ang_elev, lat_pp, long_pp)
+
+            tec_s[prn] = [slant_factor, ang_zenital, ang_elev, lat_pp, long_pp]
 
         return tec_s
 
     def detrended(self, tec, factor_glonass, l2_channel):
         """
+        Calculate the Detrended TEC
+
         :param tec: Dict with TEC python object
         :param factor_glonass: The channels values of each GLONASS PRNs to calc the selective factor
-        :param l2_channel:
+        :param l2_channel: A True value means that L2 was present at the file, then, used for the calculus. By using
+        this measure, the frequency 2 should be used. If False, the frequency 3 is used.
         :return: The updated TEC object, now, with detrended TEC calculated
         """
         tec_d = {}
@@ -196,6 +223,9 @@ class TECEstimation:
 
             tec_d[prn] = (sTEC_diff - savgol).tolist()
 
+            # utils = helper.Utils()
+            # utils.plot_dtrended(prn, l1, l2_or_l3, sTEC_diff, savgol, tec_d[prn])
+
         return tec_d
 
     def absolute(self, tec, constellations):
@@ -204,7 +234,7 @@ class TECEstimation:
         is updated with the subtraction of bias.
 
         :param tec: Dict with TEC python object
-        :param constellations:
+        :param constellations: Which constellations was eligible to be used during the calculus
         :return: The updated TEC object, now, with absolute TEC calculated
         """
         tec_a = {}
@@ -215,11 +245,11 @@ class TECEstimation:
             logging.warning()
 
         for c, const in enumerate(constellations):
-            for prn, values in tec['relative-p1c1'].items():
+            for prn, values in tec['relative'].items():
                 if prn[0:1] is not const:
                     continue
 
-                absolute = np.array(tec['relative-p1c1'][prn]) - bias_receiver[c]
+                absolute = np.array(tec['relative'][prn]) - bias_receiver[c]
                 tec_a[prn] = absolute.tolist()
 
         return tec_a
@@ -233,7 +263,7 @@ class TECEstimation:
         calculated.
 
         :param tec: Dict with TEC python object
-        :param orbit:
+        :param orbit: The Orbit dict, with all the informations of satellites, including x, y, z locations, and time
         :return: The updated TEC object, now, with vertical TEC calculated
         """
         tec_v = {}
@@ -256,6 +286,9 @@ class TECEstimation:
 
             tec_v[prn] = (absolute_np / slant_np).tolist()
 
+            # utils = helper.Utils()
+            # utils.plot_absolute_vertical(prn, tec['absolute'][prn], tec_v[prn])
+
         return tec_v
 
 
@@ -273,12 +306,20 @@ class BiasEstimation:
 
         :param array_datetime: Array of datetimes
         :return: Fractions of date indexes corresponding to every delta in the day. The delta is set up by the
-        TEC_RESOLUTION_ESTIMATION constant variable
+        TEC_RESOLUTION constant variable
         """
         indexes_fraction = []
         indexes_fraction_aux = []
 
-        delta = settings.TEC_RESOLUTION_ESTIMATION
+        if settings.TEC_RESOLUTION == 'hours':
+            delta = datetime.timedelta(hours=int(settings.TEC_RESOLUTION_VALUE))
+        elif settings.TEC_RESOLUTION == 'minutes':
+            delta = datetime.timedelta(minutes=int(settings.TEC_RESOLUTION_VALUE))
+        else:
+            delta = datetime.timedelta(hours=1)
+            logging.info(">>>> TEC resolution estimation not declare. Hourly TEC was defined as default! Please, "
+                         "check your .env and look for TEC_RESOLUTION and TEC_RESOLUTION_VALUE to set correctly!")
+
         fraction_limit = array_datetime[0] + delta
 
         for i, item in enumerate(array_datetime):
@@ -306,7 +347,7 @@ class BiasEstimation:
         value of relative / tec slant
 
         :param tec: The TEC object, with relative and slant factor, calculated by PRN
-        :param constellations:
+        :param constellations: Which constellations was eligible to be used during the calculus
         :return: The group 1 and 2 of coefficients, which is hourly mean of 1 / slant_factor, and
         hourly mean of tec_relative / slant_factor, respectively
             For example:
@@ -332,7 +373,7 @@ class BiasEstimation:
         coefficients = {}
         group_1 = {}
         group_2 = {}
-        res = str(settings.TEC_RESOLUTION_ESTIMATION)
+        res = str(settings.TEC_RESOLUTION_VALUE) + '_' + str(settings.TEC_RESOLUTION)
 
         indexes = self._split_datetime_array(tec['time'])
 
@@ -349,23 +390,35 @@ class BiasEstimation:
                         continue
 
                     elements_slant = np.take(tec['slant'][prn][0], ind)
-                    elements_relat = np.take(tec['relative-p1c1'][prn], ind)
-                    _1_slant = np.divide(1, elements_slant)
-                    _relative_slant = np.divide(elements_relat, elements_slant)
+                    elements_relat = np.take(tec['relative'][prn], ind)
 
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings('error')
-                        try:
-                            avg_sla = np.nanmean(_1_slant, dtype=np.float32)
-                        except RuntimeWarning:
-                            avg_sla = np.NaN
+                    elements_slant[np.isnan(elements_slant)] = 0.0
+                    elements_relat[np.isnan(elements_relat)] = 0.0
+                    elements_slant_pos = np.where(~(elements_slant <= settings.SLANT_FACTOR_LIMIT))[0]
+                    elements_slant = elements_slant[elements_slant <= settings.SLANT_FACTOR_LIMIT]
+                    elements_relat = np.delete(elements_relat, elements_slant_pos)
 
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings('error')
-                        try:
-                            avg_rel = np.nanmean(_relative_slant, dtype=np.float32)
-                        except RuntimeWarning:
-                            avg_rel = np.NaN
+                    if len(elements_slant) == 0:
+                        avg_sla = 0.0
+                        avg_rel = 0.0
+                    else:
+                        _1_slant = np.divide(1, elements_slant)
+                        _relative_slant = np.divide(elements_relat, elements_slant)
+
+                        _1_slant = _1_slant[_1_slant.nonzero()[0]]
+                        _relative_slant = _relative_slant[_relative_slant.nonzero()[0]]
+
+                        _1_slant = _1_slant[np.where(~np.isinf(_1_slant))[0]]
+                        _relative_slant = _relative_slant[np.where(~np.isinf(_relative_slant))[0]]
+
+                        avg_sla = np.nanmean(_1_slant, dtype=np.float32)
+                        avg_rel = np.nanmean(_relative_slant, dtype=np.float32)
+
+                        if avg_sla == np.nan:
+                            avg_sla = 0.0
+
+                        if avg_rel == np.nan:
+                            avg_rel = 0.0
 
                     group_1_aux.append(avg_sla)
                     group_2_aux.append(avg_rel)
@@ -499,7 +552,7 @@ class BiasEstimation:
         and receiver bias (B) is given by inv(A^T P A) * (A^T P L)
 
         :param tec: The measures of the current rinex
-        :param constellations:
+        :param constellations: Which constellations was eligible to be used during the calculus
         :return: The settings.INTERVAL_A_DAY elements corresponding to averages TEC over the day, more one last value,
         corresponding to the receptor/receiver bias
         """
@@ -509,7 +562,8 @@ class BiasEstimation:
         logging.info(">> Preparing coefficients...")
         coefficients = self._build_coefficients(tec, constellations)
 
-        logging.info(">> Split intervals in each {}...".format(settings.TEC_RESOLUTION_ESTIMATION))
+        logging.info(">> Split intervals in each {} {}...".format(settings.TEC_RESOLUTION_VALUE,
+                                                                  settings.TEC_RESOLUTION))
         intervals_a_day = len(list(coefficients['group_1'].keys()))
 
         logging.info(">> Building matrix A...")
@@ -522,6 +576,10 @@ class BiasEstimation:
         logging.info(">> Building matrix L...")
         l = self._build_matrix_l(coefficients['group_2'])
         l[np.isnan(l)] = 0
+
+        # np.savetxt("/home/lotte/Desktop/a.csv", a, delimiter=",")
+        # np.savetxt("/home/lotte/Desktop/p.csv", p, delimiter=",")
+        # np.savetxt("/home/lotte/Desktop/l.csv", l, delimiter=",")
 
         if a.shape[0] != p.shape[0]:
             logging.error(">>>> Matrix A dimension ({}) in row, does not match with P ({}). There is "
@@ -541,6 +599,7 @@ class BiasEstimation:
         term1 = np.dot(at, p)
         term2 = np.dot(term1, a)
         inv_atpa = np.linalg.inv(term2)
+
         atpl = np.dot(term1, l)
         b = np.dot(inv_atpa, atpl)
 
@@ -552,11 +611,12 @@ class BiasEstimation:
                             "receiver bias estimation ({}). There is something wrong! "
                             "Process stopped!\n".format(b.shape, intervals_a_day, len(constellations)))
         else:
-            logging.info(">>>> Matrix B successful calculated! TEC estimation every {} a day ({} fractions), "
-                         "plus, {} receiver bias: {} and {}!".format(settings.TEC_RESOLUTION_ESTIMATION,
-                                                                     intervals_a_day, len(constellations),
-                                                                     np.transpose(b[0:(len(b)-len(constellations))]),
-                                                                     b[len(b)-len(constellations):len(b)]))
+            logging.info(">>>> Matrix B successful calculated! TEC estimation every {} {} a day ({} fractions), plus,"
+                         " {} receiver bias:".format(settings.TEC_RESOLUTION_VALUE,
+                                                     settings.TEC_RESOLUTION,
+                                                     intervals_a_day, len(constellations)))
+            for i, item in enumerate(b[len(b)-len(constellations):len(b)]):
+                logging.info(">>>>>> {}: {}".format(constellations[i], item[0]))
 
         matrixes['A'] = a.tolist()
         matrixes['P'] = p.tolist()
@@ -641,9 +701,8 @@ class QualityControl:
         """
         From the quality metrics of each estimate value, check if the bias estimation is needed or not
 
-        :param obs: Panda object describing the rinex file measures
         :param tec: Dict with the measures of the current rinex
-        :param constellations:
+        :param constellations: Which constellations was eligible to be used during the calculus
         :param folder: Absolute path to the rinex's folder
         :param file: Rinex filename
         :return: Returns the array of tec and bias, estimated after to consider possible noisy in rinex measures
@@ -669,15 +728,14 @@ class QualityControl:
             final_date = datetime.datetime(int(year), 1, 1, settings.FINAL_HOUR_RECALC_BIAS, 0) + \
                          datetime.timedelta(int(doy) - 1)
 
-            # i = initial_date <= obs.time <= final_date
-            # range = settings.INITIAL_HOUR_RECALC_BIAS <= obs.time <= settings.FINAL_HOUR_RECALC_BIAS
-            # obs_reduced = obs.isel(range)
+            i = (obs.time >= initial_date) & (obs.time < final_date)
+            obs_short = obs.isel(i)
 
-            # if obs is None:
-            #     logging.info(">>>>>>>> No measures were made during this period of the day! Bias reestimation skipped!")
-            # else:
-            #     tec['time'] = utils.restrict_datearray(tec['time'], initial_date, final_date)
-            #     restimated_bias = bias_estimation.estimate_bias(tec, constellations)
+            if obs_short is None:
+                logging.info(">>>>>>>> No measures were made during this period of the day! Bias reestimation skipped!")
+            else:
+                tec['time'] = utils.restrict_datearray(tec['time'], initial_date, final_date)
+                restimated_bias = bias_estimation.estimate_bias(tec, constellations)
         else:
             restimated_bias = tec['bias']
 
@@ -698,6 +756,7 @@ class QualityControl:
         and standard deviation. Through these metrics, it is possible to check if the estimates were made under a noisy
         scenario or not (ionosphere disturbed days over the year).
 
+        :param matrixes: The resolution TEC problem matrixes
         :param bias: Object with the receptor estimate bias
         :return: The updated TEC object, now, with the quality of rinex measures, TEC, and bias estimation
         """
@@ -713,21 +772,17 @@ class QualityControl:
         var = self._var(A, P, L, B, ATPL)
         logging.info(">> Calculating variance a posteriori...")
         quality_meas['var'] = var.item()
-        # logging.info(">> Variance a posteriori: {}".format(quality_meas['var']))
 
         accuracy = self._accuracy(invATPA)
         logging.info(">> Calculating accuracy...")
         quality_meas['accuracy'] = accuracy.tolist()
-        # logging.info(">> Accuracy: {}".format(quality_meas['accuracy']))
 
         quality = self._quality(invATPA, quality_meas['var'])
         logging.info(">> Calculating quality...")
         quality_meas['quality'] = quality.tolist()
-        # logging.info(">> Quality: {}".format(quality_meas['quality']))
 
         residuals = self._residuals(A, L, B)
         logging.info(">> Calculating residuals...")
         quality_meas['residuals'] = residuals.tolist()
-        # logging.info(">> Residuals: {}".format(np.transpose(quality_meas['residuals'])))
 
         return quality_meas
