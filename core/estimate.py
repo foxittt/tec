@@ -291,8 +291,8 @@ class TECEstimation:
 
             tec_v[prn] = (absolute_np / slant_np).tolist()
 
-            utils = helper.Utils()
-            utils.plot_absolute_vertical(prn, tec['absolute'][prn], tec_v[prn])
+            # utils = helper.Utils()
+            # utils.plot_absolute_vertical(prn, tec['absolute'][prn], tec_v[prn])
 
         return tec_v
 
@@ -403,27 +403,35 @@ class BiasEstimation:
                     elements_slant = elements_slant[elements_slant <= settings.SLANT_FACTOR_LIMIT]
                     elements_relat = np.delete(elements_relat, elements_slant_pos)
 
-                    if len(elements_slant) == 0:
-                        avg_sla = 0.0
+                    # elements_relat_pos = np.where(~(elements_relat == np.nan))[0]
+                    # elements_relat = elements_relat[elements_relat == np.nan]
+                    # elements_slant = np.delete(elements_slant, elements_relat_pos)
+
+                    if len(elements_relat) == 0:
                         avg_rel = 0.0
+                        avg_sla = 0.0
                     else:
-                        _1_slant = np.divide(1, elements_slant)
-                        _relative_slant = np.divide(elements_relat, elements_slant)
-
-                        _1_slant = _1_slant[_1_slant.nonzero()[0]]
-                        _relative_slant = _relative_slant[_relative_slant.nonzero()[0]]
-
-                        _1_slant = _1_slant[np.where(~np.isinf(_1_slant))[0]]
-                        _relative_slant = _relative_slant[np.where(~np.isinf(_relative_slant))[0]]
-
-                        avg_sla = np.nanmean(_1_slant, dtype=np.float32)
-                        avg_rel = np.nanmean(_relative_slant, dtype=np.float32)
-
-                        if avg_sla == np.nan:
+                        if len(elements_slant) == 0:
                             avg_sla = 0.0
-
-                        if avg_rel == np.nan:
                             avg_rel = 0.0
+                        else:
+                            _1_slant = np.divide(1, elements_slant)
+                            _relative_slant = np.divide(elements_relat, elements_slant)
+
+                            _1_slant = _1_slant[_1_slant.nonzero()[0]]
+                            _1_slant = _1_slant[np.where(~np.isinf(_1_slant))[0]]
+
+                            _relative_slant = _relative_slant[_relative_slant.nonzero()[0]]
+                            _relative_slant = _relative_slant[np.where(~np.isinf(_relative_slant))[0]]
+
+                            avg_sla = np.mean(_1_slant, dtype=np.float32)
+                            avg_rel = np.mean(_relative_slant, dtype=np.float32)
+
+                    if avg_sla == np.nan:
+                        avg_sla = 0.0
+
+                    if avg_rel == np.nan:
+                        avg_rel = 0.0
 
                     group_1_aux.append(avg_sla)
                     group_2_aux.append(avg_rel)
@@ -549,7 +557,7 @@ class BiasEstimation:
 
         return l
 
-    def estimate_bias(self, tec, constellations):
+    def   estimate_bias(self, tec, constellations):
         """
         The bias estimate comprises the resolution of a equation system, which can be represented by a set of matrixes.
         The unknowns are built over averages values over the day, as shown in Otsuka et al. 2002. The solution, however,
@@ -582,9 +590,9 @@ class BiasEstimation:
         l = self._build_matrix_l(coefficients['group_2'])
         l[np.isnan(l)] = 0
 
-        # np.savetxt("/home/lotte/Desktop/a.csv", a, delimiter=" ")
-        # np.savetxt("/home/lotte/Desktop/p.csv", p, delimiter=" ")
-        # np.savetxt("/home/lotte/Desktop/l.csv", l, delimiter=" ")
+        np.savetxt("/home/lotte/Desktop/a.csv", a, delimiter=" ")
+        np.savetxt("/home/lotte/Desktop/p.csv", p, delimiter=" ")
+        np.savetxt("/home/lotte/Desktop/l.csv", l, delimiter=" ")
 
         if a.shape[0] != p.shape[0]:
             logging.error(">>>> Matrix A dimension ({}) in row, does not match with P ({}). There is "
