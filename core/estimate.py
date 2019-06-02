@@ -36,14 +36,18 @@ class TECEstimation:
         tec_r = {}
         utils = helper.Utils()
 
-        logging.info(">>>> Converting DCB nanoseconds in TEC unit...")
-        dcb_tecu = helper.Utils.convert_dcb_ns_to_tecu(dcb, factor_glonass)
+        # logging.info(">>>> Converting DCB nanoseconds in TEC unit...")
+        # dcb_tecu = helper.Utils.convert_dcb_ns_to_tecu(dcb, factor_glonass)
+
+        # logging.info(">> Correcting DCB values...")
+        # dcb_corrected = helper.Utils.correct_dcb_values(dcb, factor_glonass)
 
         logging.info(">>>> Calculating relative TEC and removing satellite DCB...")
         for prn in obs.sv.values:
             p2_or_c2 = obs[p2_or_c2_col[prn[0:1]]].sel(sv=prn).values
             p1_or_c1 = obs[p1_or_c1_col[prn[0:1]]].sel(sv=prn).values
-            factor, dcb_compensate = utils.check_availability(factor_glonass, dcb_tecu, prn)
+
+            factor, dcb_compensate = utils.check_availability(factor_glonass, dcb, prn)
 
             relative = utils.check_arc_gaps(tec, factor, p2_or_c2, p1_or_c1, prn)
 
@@ -242,7 +246,8 @@ class TECEstimation:
         bias_receiver = b[len(b)-len(constellations):len(b)]
 
         if len(bias_receiver) != len(constellations):
-            logging.warning()
+            logging.warning(">>>> Number of bias estimated ({}) is different of constellations considered ({})!".
+                            format(len(bias_receiver), len(constellations)))
 
         for c, const in enumerate(constellations):
             for prn, values in tec['relative'].items():
@@ -286,8 +291,8 @@ class TECEstimation:
 
             tec_v[prn] = (absolute_np / slant_np).tolist()
 
-            # utils = helper.Utils()
-            # utils.plot_absolute_vertical(prn, tec['absolute'][prn], tec_v[prn])
+            utils = helper.Utils()
+            utils.plot_absolute_vertical(prn, tec['absolute'][prn], tec_v[prn])
 
         return tec_v
 
@@ -577,9 +582,9 @@ class BiasEstimation:
         l = self._build_matrix_l(coefficients['group_2'])
         l[np.isnan(l)] = 0
 
-        # np.savetxt("/home/lotte/Desktop/a.csv", a, delimiter=",")
-        # np.savetxt("/home/lotte/Desktop/p.csv", p, delimiter=",")
-        # np.savetxt("/home/lotte/Desktop/l.csv", l, delimiter=",")
+        # np.savetxt("/home/lotte/Desktop/a.csv", a, delimiter=" ")
+        # np.savetxt("/home/lotte/Desktop/p.csv", p, delimiter=" ")
+        # np.savetxt("/home/lotte/Desktop/l.csv", l, delimiter=" ")
 
         if a.shape[0] != p.shape[0]:
             logging.error(">>>> Matrix A dimension ({}) in row, does not match with P ({}). There is "
@@ -772,6 +777,7 @@ class QualityControl:
         var = self._var(A, P, L, B, ATPL)
         logging.info(">> Calculating variance a posteriori...")
         quality_meas['var'] = var.item()
+        logging.info(">>>> Var: {}".format(quality_meas['var']))
 
         accuracy = self._accuracy(invATPA)
         logging.info(">> Calculating accuracy...")

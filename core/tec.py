@@ -125,6 +125,8 @@ class TEC:
             logging.info("Quality control - calculating the quality of the estimates...")
             tec['quality'] = quality_control.quality_control(tec['matrixes'], tec['bias'])
 
+            # TODO: Incluir leitura de obs (parcial): em somente parte do dia
+            # TODO: Concluir controle de qualidade por análise residual
             logging.info("Filtering - filtering measures and error detection...")
             # tec['bias'] = quality_control.check_quality(obs, tec, constellations, rinex_folder, file)
 

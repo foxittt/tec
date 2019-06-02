@@ -378,6 +378,44 @@ class Utils:
         return p_relative
 
     @staticmethod
+    def correct_dcb_values(dcb, factor_glonass):
+        """
+
+        :param dcb: The original DCB parsed file, with nanoseconds values
+        :param factor_glonass:
+        :return: The updated DCB parsed file, with the values of bias updated to meters
+        """
+        dcb_corrected = {}
+
+        if not dcb:
+            logging.info(">>>> DCB is empty. Skipping convertion!")
+            return
+
+        for key, dcb_type in dcb.items():
+            if key is 'path':
+                continue
+
+            dcb_corrected[key] = {}
+            dcb_aux = {}
+
+            # for prn, value in dcb[dcb_type]:
+            #     if prn not in dcb[dcb_type]:
+            #         continue
+
+            for prn, value in dcb_type.items():
+                p1p2_dcb = value
+                p1c1_dcb = value
+                factor = Utils.frequency_by_constellation(prn, factor_glonass)[5]
+
+                dcb_aux[prn] = ((-p1p2_dcb + p1c1_dcb) * (settings.C / pow(10, 9))) * factor
+                # new_value = [x * ns_to_meter for x in value]
+                # dcb_aux[prn] = [new_value[0], value[1]]
+
+            dcb_corrected[key].update(dcb_aux)
+
+        return dcb_corrected
+
+    @staticmethod
     def convert_dcb_ns_to_meter(dcb):
         """
         DCB files originally store values in nanoseconds unit. In order to use those values to remove ou correct another
@@ -450,19 +488,27 @@ class Utils:
         """
         input = InputFiles()
 
+        dcb_compensate = 0.0
         f1, f2, f3, factor_1, factor_2, factor_3 = input.frequency_by_constellation(prn, factor_glonass)
 
         if prn not in dcb['P1-P2']:
             logging.info(">>>>>> Relative TEC for {} constellation, was not compensate due to "
                          "the lack of DCB/factor GLONASS for PRN {}".format(prn[0:1], prn))
-            return
+            return factor_3, dcb_compensate
+
+        if prn not in dcb['C1-P1']:
+            logging.info(">>>>>> Relative TEC for {} constellation, was not compensate due to "
+                         "the lack of DCB/factor GLONASS for PRN {}".format(prn[0:1], prn))
+            return factor_3, dcb_compensate
 
         if prn[0:1] is 'R' and prn[1:] not in factor_glonass:
             logging.info(">>>>>> Relative TEC for {} constellation, was not compensate due to "
                          "the lack of DCB/factor GLONASS for PRN {}".format(prn[0:1], prn))
-            return
+            return factor_3, dcb_compensate
 
-        dcb_compensate = dcb['P1-P2'][prn][0]
+        p1p2_dcb = dcb['P1-P2'][prn][0]
+        c1p1_dcb = dcb['C1-P1'][prn][0]
+        dcb_compensate = ((-p1p2_dcb - c1p1_dcb) * (settings.C / pow(10, 9))) * factor_3
 
         return factor_3, dcb_compensate
 
@@ -953,8 +999,8 @@ class InputFiles:
         logging.info(">> Converting DCB nanoseconds in meter unit...")
         dcb_m = Utils.convert_dcb_ns_to_meter(dcb)
 
-        #logging.info(">> Checking the availability of P1 and P2...")
-        #obs = self.compensating_c1_c2(hdr, obs, dcb_m, columns, constellations)
+        logging.info(">> Checking the availability of P1 and P2...")
+        obs = self.compensating_c1_c2(hdr, obs, dcb_m, columns, constellations)
 
         return hdr, obs, orbit, dcb, factor_glonass, l1_col, l2_or_l3_col, p1_or_c1_col, \
                p2_or_c2_col, l2_channel, constellations
