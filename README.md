@@ -15,7 +15,7 @@ Please, fell free to read more in [EMBRACE](http://www2.inpe.br/climaespacial/po
 Dr. Cristiano Max Wrasse (Pesquisador) [_cristiano.wrasse@inpe.br_]  
 Dr. Cosme A. O. B. Figueiredo [_cosme.figueiredo@inpe.br_]  
 
-###### Desenvolvimento - EMBRACE/INPE
+###### Development team - EMBRACE/INPE
 Dr. Rodolfo G. Lotte [_rodolfo.lotte@inpe.br_]  
  
 ***
@@ -38,8 +38,7 @@ This module includes the calculation of:
 - Vertical TEC
 
 ## Output
-This module runs for a set of rinex files. For each rinex processed, a 
-python dictionary JSON-like structured is generated.
+This module runs for a set of rinex files. For each rinex processed, a python dictionary JSON-like structured is generated.
 
 ## Contributing:
 ### TODO list: 
@@ -48,112 +47,41 @@ situations are still demanded. If you notice some kind of mistake in the code, o
 optimize any method, please, fell free to clone this project and help our team to get better estimates.
 
 ### Preparing your environment:
-To contribute, you have to clone this repository and start your analysis/debugs/so on.
+To contribute, you have to clone this repository and start your analysis/debugs/ so on.
 
 After to clone the repository [git](https://github.com/embrace-inpe/tec) in your local directory, 
 the following the instructions will guide you to execute the model in your computer.
 
-1. [Create a isolated Python environment with virtualenv](#2 )
-2. [Installing dependencies with `pip`](#2-Instalando-dependncias)
-3. [Setting up the constants](#4-Configurando-constantes)
-4. [Executing the `main.py`](#5-Execuo-do-programa)
-5. [Performance](#6-Performance)
+#### 1. Updating your Python
+The EMBRACE TEC and Bias estimation was developed using version Python 3.7+. If you do not have this version in your computer, an upgrade will be need. 
 
-#### 1. Create a isolated Python environment with virtualenv
-Go to `tec/` and create an isolated environment with:
+First, check the version of your python typing `python -V`. If old versions are diplayed, thus, follow the steps below. For most of Ubuntu users, two versions are available on the OS, `python2.7`, and `python3`, which still do not fill the requirement due the `python3` be usually under version 3.6 (to check this, please, type `python3 -V`). If not, the following steps can solve the problem.
 
-```console
-$ python -m venv .venv
+To start the upgrade, update your system:
+```
+sudo apt-get update && sudo apt-get upgrade && sudo apt-get update
+```
+then, run:
+```
+sudo apt-get install python3.7
 ```
 
-To activate your `venv`, type the following: 
-
-```console
-$ source .venv/bin/activate
+If everything is ok, edit your `bashrc` file:
+```
+sudo nano ~/.bashrc
+```
+and update the file:
+```
+source ~/.bashrc
 ```
 
-If everything is ok, you will see the virtual env prefix:
-```console
-(.venv) usuario@maquina:<seu-diretorio>$ your commands here
+and include at the last line: `alias python=python3.7`. Type:
 ```
+python -V
+``` 
 
-Now, everything installed through `pip`, will be encapsulated by the `venv`, and will be available only in this 
-respective scope.
-
-To deactivate, just type: 
-
-```console
-$ deactivate
-```
-
-#### 2. Installing the dependencies with `pip`
-After you have set all the variables in `.env` with you personal information, you need to install the 
-dependencies listed in `requirements.txt`:
-```
-pip3 install -r requirements.txt
-```
-Then, run:
-```
-python3 runtests.py
-```
-
-#### 3. Setting up the constants in `.env`
-The `settings.py` is the module responsible to store all the constants used by the model. Besides these constants, 
-another ones are also essential to make the process possible, the ones respected to your 
-computer!
-
-So, in this case, the constants that change the computer by computer, is setup in `.env` file. 
-Here, you can set what you want to consider in the modelling. For instance, the 
-constellations, the minimum required rinex version, the resolution of estimation (1 hour, 
-10 minutes, so on), and the paths the rinex are! 
-
-First, copy the file `.env-example` and rename for `.env`. You will see all variables setted like:
-```
-PATH_DCB=
-PATH_ORBIT=
-PATH_GLONASS_CHANNEL=
-RINEX_FOLDER=
-
-MIN_REQUIRED_VERSION=2.11
-CONSTELATIONS=['G', 'R', 'E', 'C']
-TEC_RESOLUTION=hours
-TEC_RESOLUTION_VALUE=1
-KEYS_SAVE=['time', 'slant-dtec', 'slant', 'detrended', 'bias', 'quality', 'vertical']
-```
-
-- `PATH_DCB`:
-- `PATH_ORBIT`: 
-- `PATH_GLONASS_CHANNEL`: 
-- `RINEX_FOLDER`: 
-- `MIN_REQUIRED_VERSION`: 
-- `TEC_RESOLUTION`: 
-- `TEC_RESOLUTION_VALUE`: 
-- `KEYS_SAVE`:
- 
-#### 4. Executing the `main.py`
-Once the `.venv` activated, the main execution should be made by the `main.py` script:
-```console
-$ python main.py
-```
-
-If all correct, the output will be something like:
-```console
-[2019.06.02 13:34:01] {tec.py         :81  } INFO : - ango2220.14o - TEC by fractions of 1 hours a day, and bias receiver estimation 
-[2019.06.02 13:34:01] {tec.py         :82  } INFO : Preparing inputs... 
-[2019.06.02 13:34:01] {helper.py      :843 } INFO : >> Validating file and measures... 
-[2019.06.02 13:34:01] {helper.py      :845 } INFO : >>>> Rinex version 3.01! 
-[2019.06.02 13:34:01] {helper.py      :756 } INFO : >>>>>> Column L1 is not available for constellation E. TEC wont be consider for this constellation! 
-[2019.06.02 13:34:01] {helper.py      :756 } INFO : >>>>>> Column L1 is not available for constellation C. TEC wont be consider for this constellation! 
-[2019.06.02 13:34:01] {helper.py      :857 } INFO : >> Reading rinex measures... Only constellation(s) ['G'] will be considered! 
-[2019.06.02 13:34:35] {helper.py      :882 } INFO : >> Downloading GLONASS channels in https://www.glonass-iac.ru/en/CUSGLONASS/ for pseudorange calculation... 
-[2019.06.02 13:34:35] {downloads.py   :78  } INFO : >>>> Glonass Channel File already exist. Download skipped! 
-[2019.06.02 13:34:35] {parser.py      :166 } INFO : >> Starting GLONASS channels parsing... 
-[2019.06.02 13:34:35] {helper.py      :918 } INFO : >> Downloading Orbit files...
-[...]
-```
-
-#### 5. Performance
-
+## Example of use
+An example of using this package/library, can be found (here)[https://github.com/rodolfolotte/tec-example].
 
 ## Log
 Download errors will be listed in tec.log on root path.
